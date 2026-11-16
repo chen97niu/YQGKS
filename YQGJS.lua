@@ -1,8 +1,11 @@
 --[[
-    概念神菜单 (Concept God Menu) - 透明背景 / 手机适配版
+    概念神菜单 (Concept God Menu) - 最终完美版
     文件名: YQGJS.lua
-    特性: 右侧滑动按视角飞行 + 新增 R15 通用飞行动作包
-    手机飞行：左侧摇杆平移，右侧滑动顺着视角飞
+    特性: 
+      1. 摇杆自由飞行（视角指哪飞哪，右侧滑屏仅转视角）
+      2. R15 飞行动作自动切换
+      3. 透视自动识别敌友（红敌 / 绿友）
+      4. 锁头功能（自动吸附敌方头部，不锁队友）
 ]]
 
 -- ================= 配置 =================
@@ -11,8 +14,7 @@ local CONFIG = {
     JumpPowerValue    = 120,
     WalkSpeedValue    = 80,
     FlySpeed          = 60,
-    -- 右侧滑动多少像素达到满速（越小越灵敏）
-    FlyVertSensitivity = 200,
+    AimbotFOV         = 300, -- 锁头视野范围（屏幕像素）
     DesignW           = 420,
     DesignH           = 640,
 }
@@ -40,7 +42,7 @@ local IS_MOBILE = IS_TOUCH
 
 -- ================= 状态 =================
 local State = {
-    Fly=false, ESP=false, Noclip=false, JumpPower=false, Speed=false,
+    Fly=false, ESP=false, Noclip=false, JumpPower=false, Speed=false, Aimbot=false,
 }
 
 -- ================= 小工具 =================
@@ -58,6 +60,17 @@ local function stroke(parent, color, thickness)
     s.Transparency = 0.55
     s.Parent = parent
     return s
+end
+
+-- ================= 敌友识别逻辑 =================
+local function isAlly(player)
+    if player == LP then return true end
+    -- 如果双方都有队伍，且队伍相同，视为队友
+    if LP.Team and player.Team then
+        return LP.Team == player.Team
+    end
+    -- 没队伍的默认全当敌人处理
+    return false
 end
 
 -- ================= 旧 UI 清理 =================
@@ -79,7 +92,7 @@ end
 -- ================= 主窗口（透明背景） =================
 local Main = Instance.new("Frame")
 Main.Name = "Main"
-Main.Size = UDim2.new(0, 300, 0, 400)
+Main.Size = UDim2.new(0, 300, 0, 450) -- 加高一点放锁头按钮
 Main.Position = UDim2.new(0, 20, 0, 90)
 Main.BackgroundTransparency = 1
 Main.BorderSizePixel = 0
@@ -208,7 +221,7 @@ FoldBtn.MouseButton1Click:Connect(function()
     folded = not folded
     List.Visible = not folded
     Main.Size = folded and UDim2.new(0, 300, 0, IS_MOBILE and 48 or 44)
-                           or UDim2.new(0, 300, 0, 400)
+                           or UDim2.new(0, 300, 0, 450)
     FoldBtn.Text = folded and "+" or "-"
 end)
 
@@ -272,65 +285,17 @@ local function getControls()
     return Controls
 end
 
--- ================= 飞行（带 R15 动画） =================
+-- ================= 飞行系统 (完全靠摇杆) =================
 local Fly = {
     conn = nil, lv = nil, ao = nil, att = nil,
-    inputBegan = nil, inputEnded = nil,
     animTracks = {}, currentAnim = "",
 }
 local upKey, downKey = false, false
-
--- 右侧滑动升降
-local RightTouch, RightStartY, VertInput = nil, 0, 0
-local tStart, tMove, tEnd, tCancel = nil, nil, nil, nil
-
-local function resetVert()
-    RightTouch = nil
-    RightStartY = 0
-    VertInput = 0
-end
-
-local function teardownMobileFlightInput()
-    if tStart  then tStart:Disconnect();  tStart  = nil end
-    if tMove   then tMove:Disconnect();   tMove   = nil end
-    if tEnd    then tEnd:Disconnect();    tEnd    = nil end
-    if tCancel then tCancel:Disconnect(); tCancel = nil end
-    resetVert()
-end
-
-local function setupMobileFlightInput()
-    if not IS_TOUCH then return end
-    teardownMobileFlightInput()
-
-    tStart = UIS.TouchStarted:Connect(function(input, gp)
-        if gp then return end
-        if not State.Fly then return end
-        local vp = Camera.ViewportSize
-        if input.Position.X >= vp.X * 0.5 and RightTouch == nil then
-            RightTouch = input
-            RightStartY = input.Position.Y
-            VertInput = 0
-        end
-    end)
-    tMove = UIS.TouchMoved:Connect(function(input)
-        if RightTouch and input == RightTouch and State.Fly then
-            local dy = input.Position.Y - RightStartY
-            VertInput = math.clamp(-dy / CONFIG.FlyVertSensitivity, -1, 1)
-        end
-    end)
-    tEnd = UIS.TouchEnded:Connect(function(input)
-        if RightTouch and input == RightTouch then
-            resetVert()
-        end
-    end)
-    tCancel = UIS.TouchEnded:Connect(function() resetVert() end)
-end
 
 -- 切换飞行动画
 local function setFlyAnim(stateName)
     if Fly.currentAnim == stateName then return end
     Fly.currentAnim = stateName
-
     for name, track in pairs(Fly.animTracks) do
         if name == stateName then
             track:Play(0.2)
@@ -349,7 +314,6 @@ local function loadFlyAnims(hum)
         animator = Instance.new("Animator")
         animator.Parent = hum
     end
-    
     for name, id in pairs(FLY_ANIMS) do
         local anim = Instance.new("Animation")
         anim.AnimationId = "rbxassetid://" .. id
@@ -362,8 +326,6 @@ end
 
 local function cleanFly()
     if Fly.conn       then Fly.conn:Disconnect();       Fly.conn = nil end
-    if Fly.inputBegan then Fly.inputBegan:Disconnect(); Fly.inputBegan = nil end
-    if Fly.inputEnded then Fly.inputEnded:Disconnect(); Fly.inputEnded = nil end
     if Fly.lv         then Fly.lv:Destroy();            Fly.lv = nil end
     if Fly.ao         then Fly.ao:Destroy();            Fly.ao = nil end
     if Fly.att        then Fly.att:Destroy();           Fly.att = nil end
@@ -373,8 +335,6 @@ local function cleanFly()
     end
     Fly.animTracks = {}
     Fly.currentAnim = ""
-
-    teardownMobileFlightInput()
     upKey, downKey = false, false
 
     local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
@@ -392,7 +352,7 @@ local function ToggleFly(on)
     if not hrp or not hum then return end
 
     hum.PlatformStand = true
-    loadFlyAnims(hum) -- 加载 R15 飞行动作
+    loadFlyAnims(hum)
 
     Fly.att = Instance.new("Attachment")
     Fly.att.Name = "CG_FlyAtt"
@@ -413,19 +373,18 @@ local function ToggleFly(on)
     Fly.ao.RigidityEnabled = true
     Fly.ao.Parent = hrp
 
+    -- 桌面端依然保留空格升降
     if UIS.KeyboardEnabled then
-        Fly.inputBegan = UIS.InputBegan:Connect(function(i, gp)
+        UIS.InputBegan:Connect(function(i, gp)
             if gp then return end
             if i.KeyCode == Enum.KeyCode.Space then upKey = true end
             if i.KeyCode == Enum.KeyCode.LeftShift then downKey = true end
         end)
-        Fly.inputEnded = UIS.InputEnded:Connect(function(i)
+        UIS.InputEnded:Connect(function(i)
             if i.KeyCode == Enum.KeyCode.Space then upKey = false end
             if i.KeyCode == Enum.KeyCode.LeftShift then downKey = false end
         end)
     end
-
-    if IS_TOUCH then setupMobileFlightInput() end
 
     Fly.conn = RunService.RenderStepped:Connect(function()
         local c = LP.Character
@@ -435,12 +394,7 @@ local function ToggleFly(on)
         local cam = workspace.CurrentCamera
         local camCF = cam.CFrame
 
-        local lookFlat = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
-        if lookFlat.Magnitude > 1e-4 then lookFlat = lookFlat.Unit end
-        local rightFlat = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z)
-        if rightFlat.Magnitude > 1e-4 then rightFlat = rightFlat.Unit end
-
-        -- 水平：读自带摇杆
+        -- 只读取摇杆，不再拦截右侧触摸，右侧完全留给相机
         local mv = Vector3.zero
         local ctl = getControls()
         if ctl then
@@ -448,52 +402,88 @@ local function ToggleFly(on)
             if ok and typeof(v) == "Vector3" then mv = v end
         end
 
+        -- 计算 3D 飞行方向（基于相机视线）
+        -- 当 mv.Z = -1 (前推) 时，加上相机的 LookVector，实现视角抬头就往上飞
         local dir = Vector3.zero
-        dir += lookFlat  * (-mv.Z)
-        dir += rightFlat * ( mv.X)
-
-        -- 垂直：右侧滑动 + 桌面 Space/Shift
-        local vy = VertInput
-        if upKey   then vy += 1 end
-        if downKey then vy -= 1 end
-        vy = math.clamp(vy, -1, 1)
-        
-        if vy ~= 0 then
-            dir += camCF.LookVector * vy
+        if mv.Magnitude > 0.05 then
+            dir += camCF.LookVector * (-mv.Z)
+            dir += camCF.RightVector * (mv.X)
         end
+        
+        -- 键盘升降叠加
+        if upKey then dir += Vector3.new(0, 1, 0) end
+        if downKey then dir -= Vector3.new(0, 1, 0) end
 
-        -- 应用速度
         if dir.Magnitude > 1e-4 then
             Fly.lv.VectorVelocity = dir.Unit * CONFIG.FlySpeed
         else
             Fly.lv.VectorVelocity = Vector3.zero
         end
 
-        -- 角色朝向
+        -- 角色始终保持直立，朝向相机水平方向
+        local lookFlat = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+        if lookFlat.Magnitude > 1e-4 then lookFlat = lookFlat.Unit end
         local yaw = math.atan2(-lookFlat.X, -lookFlat.Z)
         Fly.ao.CFrame = CFrame.new(Vector3.zero) * CFrame.Angles(0, yaw, 0)
 
-        -- ========== 动画状态机 ==========
-        local inputMag = Vector2.new(mv.X, mv.Z).Magnitude
-        local totalMag = math.sqrt(inputMag^2 + vy^2)
-        
-        if totalMag < 0.05 then
+        -- ========== 动画逻辑 ==========
+        local inputMag = mv.Magnitude
+        local isVertical = math.abs(dir.Y) > (Vector2.new(dir.X, dir.Z).Magnitude)
+
+        if inputMag < 0.05 and not upKey and not downKey then
             setFlyAnim("Idle")
-        elseif vy > 0.5 and inputMag < 0.5 then
-            setFlyAnim("Jump") -- 主要往上升
-        elseif vy < -0.5 and inputMag < 0.5 then
-            setFlyAnim("Fall") -- 主要往下降
+        elseif (isVertical and dir.Y > 0) or upKey then
+            setFlyAnim("Jump")
+        elseif (isVertical and dir.Y < 0) or downKey then
+            setFlyAnim("Fall")
         else
             if inputMag > 0.5 then
-                setFlyAnim("Run") -- 摇杆推得深，快速飞
+                setFlyAnim("Run")
             else
-                setFlyAnim("Walk") -- 摇杆推得浅，慢速飞
+                setFlyAnim("Walk")
             end
         end
     end)
 end
 
--- ================= ESP =================
+-- ================= 锁头 (Aimbot) =================
+local AimbotConn = nil
+local function ToggleAimbot(on)
+    if AimbotConn then AimbotConn:Disconnect(); AimbotConn = nil end
+    if not on then return end
+
+    AimbotConn = RunService.RenderStepped:Connect(function()
+        local closestHead, shortestDist = nil, CONFIG.AimbotFOV
+        local center = Camera.ViewportSize / 2
+
+        for _, p in ipairs(Players:GetPlayers()) do
+            if not isAlly(p) and p.Character then
+                local head = p.Character:FindFirstChild("Head")
+                local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                
+                if head and hum and hum.Health > 0 then
+                    -- 转屏幕坐标
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                    if onScreen then
+                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        if dist < shortestDist then
+                            shortestDist = dist
+                            closestHead = head
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 锁定目标，平滑插值
+        if closestHead then
+            local targetCF = CFrame.new(Camera.CFrame.Position, closestHead.Position)
+            Camera.CFrame = Camera.CFrame:Lerp(targetCF, 0.4)
+        end
+    end)
+end
+
+-- ================= ESP (敌友自动识别) =================
 local ESPPlayerConn = nil
 local ESPObjects = {}
 
@@ -529,6 +519,10 @@ local function AddESP(player)
 
     RemoveESPFromPlayer(player)
 
+    local isEnemy = not isAlly(player)
+    local mainColor = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+    local outlineColor = isEnemy and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
+
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "CG_ESP"
     billboard.Adornee = hrp
@@ -540,8 +534,8 @@ local function AddESP(player)
     local label = Instance.new("TextLabel")
     label.Size = UDim2.new(1, 0, 1, 0)
     label.BackgroundTransparency = 1
-    label.Text = player.Name
-    label.TextColor3 = Color3.fromRGB(255,90,90)
+    label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name
+    label.TextColor3 = mainColor
     label.TextStrokeTransparency = 0
     label.Font = Enum.Font.GothamBold
     label.TextSize = 14
@@ -550,9 +544,9 @@ local function AddESP(player)
     local highlight = Instance.new("Highlight")
     highlight.Name = "CG_ESP_Highlight"
     highlight.Adornee = char
-    highlight.FillColor = Color3.fromRGB(255,0,0)
+    highlight.FillColor = mainColor
     highlight.FillTransparency = 0.65
-    highlight.OutlineColor = Color3.fromRGB(255,90,90)
+    highlight.OutlineColor = outlineColor
     highlight.Parent = char
 
     table.insert(ESPObjects, billboard)
@@ -631,6 +625,7 @@ CreateToggle("透视 (ESP)", "ESP", ToggleESP)
 CreateToggle("穿墙 (Noclip)", "Noclip", ToggleNoclip)
 CreateToggle("加强跳跃 (Jump)", "JumpPower", ToggleJump)
 CreateToggle("加强移速 (Speed)", "Speed", ToggleSpeed)
+CreateToggle("锁头 (Aimbot)", "Aimbot", ToggleAimbot) -- 新增锁头
 
 -- ================= 重生处理 =================
 LP.CharacterAdded:Connect(function()
@@ -647,12 +642,10 @@ end)
 CloseBtn.MouseButton1Click:Connect(function()
     cleanFly()
     if NoclipConn then NoclipConn:Disconnect(); NoclipConn = nil end
+    if AimbotConn then AimbotConn:Disconnect(); AimbotConn = nil end
     ClearESP()
     ScreenGui:Destroy()
 end)
 
 -- ================= 提示 =================
 print("[概念神菜单] 已加载。仅限自己的私人体验使用。")
-if IS_TOUCH then
-    print("[概念神菜单] 飞行已升级：包含 R15 通用动作，右侧滑屏可按视角飞行。")
-end
