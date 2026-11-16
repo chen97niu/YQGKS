@@ -1,11 +1,7 @@
 --[[
-    概念神菜单 (Concept God Menu) - 终极修复版
+    概念神菜单 (Concept God Menu) - 终极修复版 2.0
     文件名: YQGJS.lua
-    特性: 
-      1. 摇杆自由飞行（视角指哪飞哪）
-      2. 透视阵营自由切换（队伍/全红/全绿）
-      3. 锁头防覆盖（BindToRenderStep）
-      4. 穿墙强制推送（防止被服务器弹回）
+    修复：移速防回弹、穿墙不遁地
 ]]
 
 -- ================= 配置 =================
@@ -42,16 +38,15 @@ local State = {
 }
 local ESPMode = 1 -- 1: 队伍识别, 2: 全部敌人, 3: 全部友军
 
--- ================= 敌友识别逻辑 =================
+-- ================= 敌友识别 =================
 local function isAlly(player)
     if player == LP then return true end
-    if ESPMode == 2 then return false end -- 全部敌人
-    if ESPMode == 3 then return true end  -- 全部友军
-    -- 队伍模式
+    if ESPMode == 2 then return false end
+    if ESPMode == 3 then return true end
     if LP.Team and player.Team then
         return LP.Team == player.Team
     end
-    return false -- 没队伍的默认当敌人
+    return false
 end
 
 -- ================= 小工具 =================
@@ -243,7 +238,6 @@ local function CreateToggle(text, key, callback)
     return Btn
 end
 
--- 特殊：循环切换按钮（用于阵营模式）
 local function CreateCycleBtn(text, options, initialIdx, callback)
     local Btn = Instance.new("TextButton")
     Btn.Size = UDim2.new(1, 0, 0, BTN_H)
@@ -357,12 +351,10 @@ local function ToggleFly(on)
 
         local dir = Vector3.zero
         if mv.Magnitude > 0.05 then
-            -- 根据相机的视线方向飞行
             dir += camCF.LookVector * (-mv.Z)
             dir += camCF.RightVector * (mv.X)
         end
 
-        -- 桌面端空格辅助上升
         if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0,1,0) end
         if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= Vector3.new(0,1,0) end
 
@@ -400,7 +392,6 @@ local function ToggleAimbot(on)
         return
     end
 
-    -- 使用 BindToRenderStep 在相机更新之后覆盖视角
     RunService:BindToRenderStep("CG_Aimbot", Enum.RenderPriority.Camera.Value + 1, function()
         if not State.Aimbot then return end
         local closestHead, shortestDist = nil, CONFIG.AimbotFOV
@@ -423,9 +414,7 @@ local function ToggleAimbot(on)
         end
 
         if closestHead then
-            -- 强制覆盖相机的朝向来锁头
-            local targetPos = closestHead.Position
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, targetPos)
+            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closestHead.Position)
         end
     end)
 end
@@ -498,13 +487,13 @@ local function ToggleESP(on)
     end
 end
 
--- ================= 穿墙 (防弹回版) =================
+-- ================= 穿墙 (遁地修复版) =================
 local NoclipConn = nil
 local function ToggleNoclip(on)
     if NoclipConn then NoclipConn:Disconnect(); NoclipConn = nil end
-    local char = LP.Character
     
     if not on then
+        local char = LP.Character
         if char then
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") then part.CanCollide = true end
@@ -515,29 +504,51 @@ local function ToggleNoclip(on)
         return
     end
 
+    -- 开启穿墙：仅仅取消碰撞，保留重力（不会遁地），也不强推 Velocity（防回弹）
     NoclipConn = RunService.Stepped:Connect(function()
+        if State.Fly then return end -- 飞行时不走穿墙逻辑，避免冲突
         local c = LP.Character
         if not c then return end
         for _, part in ipairs(c:GetDescendants()) do
-            if part:IsA("BasePart") then part.CanCollide = false end
-        end
-        
-        local hum = c:FindFirstChildOfClass("Humanoid")
-        local hrp = c:FindFirstChild("HumanoidRootPart")
-        if hum and hrp then
-            hum.PlatformStand = true -- 屏蔽服务端物理回弹
-            if hum.MoveDirection.Magnitude > 0.1 then
-                -- 强行给前进方向施加推力，穿进墙里
-                hrp.Velocity = hum.MoveDirection * 60
-            else
-                hrp.Velocity = Vector3.zero
+            if part:IsA("BasePart") then 
+                part.CanCollide = false 
             end
         end
     end)
 end
 
--- ================= 跳跃 / 移速 =================
-local origJump, origSpeed
+-- ================= 移速 (防回弹版) =================
+local SpeedConn = nil
+local origSpeed
+local function ToggleSpeed(on)
+    if SpeedConn then SpeedConn:Disconnect(); SpeedConn = nil end
+    
+    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    if on then
+        origSpeed = hum.WalkSpeed
+        hum.WalkSpeed = CONFIG.WalkSpeedValue
+        -- 关键：每帧通过 CFrame 极微小瞬移补偿，绕过服务器速度校验
+        SpeedConn = RunService.RenderStepped:Connect(function()
+            local c = LP.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            if h and root and not State.Fly and not State.Noclip then
+                h.WalkSpeed = CONFIG.WalkSpeedValue -- 持续覆盖
+                if h.MoveDirection.Magnitude > 0.1 then
+                    local addSpeed = (CONFIG.WalkSpeedValue - 16) * 0.02
+                    root.CFrame = root.CFrame + (h.MoveDirection * addSpeed)
+                end
+            end
+        end)
+    else
+        if origSpeed then hum.WalkSpeed = origSpeed end
+    end
+end
+
+-- ================= 跳跃 =================
+local origJump
 local function ToggleJump(on)
     local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
     if not hum then return end
@@ -545,20 +556,12 @@ local function ToggleJump(on)
     else if origJump then hum.JumpPower = origJump end end
 end
 
-local function ToggleSpeed(on)
-    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    if on then origSpeed = hum.WalkSpeed; hum.WalkSpeed = CONFIG.WalkSpeedValue
-    else if origSpeed then hum.WalkSpeed = origSpeed end end
-end
-
 -- ================= 绑定按钮 =================
 CreateToggle("飞天 (Fly)", "Fly", function(on) ToggleFly(on) end)
 CreateToggle("透视 (ESP)", "ESP", ToggleESP)
--- 插入阵营切换按钮
 CreateCycleBtn("透视阵营", {"仅队伍识别", "全部视为敌人", "全部视为友军"}, 1, function(idx)
     ESPMode = idx
-    RefreshESP() -- 切换后立刻刷新颜色
+    RefreshESP()
 end)
 CreateToggle("穿墙 (Noclip)", "Noclip", ToggleNoclip)
 CreateToggle("加强跳跃 (Jump)", "JumpPower", ToggleJump)
@@ -578,9 +581,10 @@ end)
 CloseBtn.MouseButton1Click:Connect(function()
     cleanFly()
     if NoclipConn then NoclipConn:Disconnect(); end
+    if SpeedConn then SpeedConn:Disconnect(); end
     pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
     ClearESP()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] 已加载终极修复版！")
+print("[概念神菜单] 已加载终极修复版 2.0！")
