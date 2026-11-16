@@ -1,8 +1,8 @@
 --[[
     概念神菜单 (Concept God Menu) - 透明背景 / 手机适配版
     文件名: YQGJS.lua
-    特性: 已升级新版物理引擎 (LinearVelocity + AlignOrientation)，加强 ESP 对象回收
-    手机飞行：左侧 = Roblox 自带摇杆(前后左右)，右侧滑动 = 升降
+    特性: 右侧滑动按视角飞行 + 新增 R15 通用飞行动作包
+    手机飞行：左侧摇杆平移，右侧滑动顺着视角飞
 ]]
 
 -- ================= 配置 =================
@@ -11,10 +11,19 @@ local CONFIG = {
     JumpPowerValue    = 120,
     WalkSpeedValue    = 80,
     FlySpeed          = 60,
-    -- 右侧滑动多少像素达到满速升降（越小越灵敏）
+    -- 右侧滑动多少像素达到满速（越小越灵敏）
     FlyVertSensitivity = 200,
     DesignW           = 420,
     DesignH           = 640,
+}
+
+-- 飞行动作包 ID (R15)
+local FLY_ANIMS = {
+    Idle = 619542203, -- 浮空待机
+    Walk = 619544080, -- 浮空走路
+    Run  = 619543231, -- 浮空奔跑
+    Jump = 619542888, -- 浮空跳跃(上升)
+    Fall = 619541867, -- 浮空下落(下降)
 }
 
 -- ================= 服务 =================
@@ -27,7 +36,7 @@ local LP     = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
 local IS_TOUCH  = UIS.TouchEnabled
-local IS_MOBILE = IS_TOUCH   -- 仅用于 UI 大小适配
+local IS_MOBILE = IS_TOUCH
 
 -- ================= 状态 =================
 local State = {
@@ -71,7 +80,7 @@ end
 local Main = Instance.new("Frame")
 Main.Name = "Main"
 Main.Size = UDim2.new(0, 300, 0, 400)
-Main.Position = UDim2.new(0, 20, 0, 90)   -- 放左上，右侧留给滑动升降
+Main.Position = UDim2.new(0, 20, 0, 90)
 Main.BackgroundTransparency = 1
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -263,10 +272,11 @@ local function getControls()
     return Controls
 end
 
--- ================= 飞行（新版物理约束） =================
+-- ================= 飞行（带 R15 动画） =================
 local Fly = {
     conn = nil, lv = nil, ao = nil, att = nil,
     inputBegan = nil, inputEnded = nil,
+    animTracks = {}, currentAnim = "",
 }
 local upKey, downKey = false, false
 
@@ -305,7 +315,6 @@ local function setupMobileFlightInput()
     tMove = UIS.TouchMoved:Connect(function(input)
         if RightTouch and input == RightTouch and State.Fly then
             local dy = input.Position.Y - RightStartY
-            -- 向上滑(dy<0) 上升；向下滑(dy>0) 下降
             VertInput = math.clamp(-dy / CONFIG.FlyVertSensitivity, -1, 1)
         end
     end)
@@ -314,7 +323,41 @@ local function setupMobileFlightInput()
             resetVert()
         end
     end)
-    tCancel = UIS.TouchEnded:Connect(function() resetVert() end) -- 兜底
+    tCancel = UIS.TouchEnded:Connect(function() resetVert() end)
+end
+
+-- 切换飞行动画
+local function setFlyAnim(stateName)
+    if Fly.currentAnim == stateName then return end
+    Fly.currentAnim = stateName
+
+    for name, track in pairs(Fly.animTracks) do
+        if name == stateName then
+            track:Play(0.2)
+        else
+            track:Stop(0.2)
+        end
+    end
+end
+
+-- 加载飞行动画
+local function loadFlyAnims(hum)
+    Fly.animTracks = {}
+    Fly.currentAnim = ""
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = hum
+    end
+    
+    for name, id in pairs(FLY_ANIMS) do
+        local anim = Instance.new("Animation")
+        anim.AnimationId = "rbxassetid://" .. id
+        local track = animator:LoadAnimation(anim)
+        track.Priority = Enum.AnimationPriority.Action
+        track.Looped = true
+        Fly.animTracks[name] = track
+    end
 end
 
 local function cleanFly()
@@ -324,6 +367,13 @@ local function cleanFly()
     if Fly.lv         then Fly.lv:Destroy();            Fly.lv = nil end
     if Fly.ao         then Fly.ao:Destroy();            Fly.ao = nil end
     if Fly.att        then Fly.att:Destroy();           Fly.att = nil end
+    
+    for _, track in pairs(Fly.animTracks) do
+        track:Stop(0)
+    end
+    Fly.animTracks = {}
+    Fly.currentAnim = ""
+
     teardownMobileFlightInput()
     upKey, downKey = false, false
 
@@ -339,16 +389,15 @@ local function ToggleFly(on)
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hrp then return end
+    if not hrp or not hum then return end
 
-    if hum then hum.PlatformStand = true end
+    hum.PlatformStand = true
+    loadFlyAnims(hum) -- 加载 R15 飞行动作
 
-    -- 新版物理移动器：基于 Attachment
     Fly.att = Instance.new("Attachment")
     Fly.att.Name = "CG_FlyAtt"
     Fly.att.Parent = hrp
 
-    -- 线性速度 (代替 BodyVelocity)
     Fly.lv = Instance.new("LinearVelocity")
     Fly.lv.Name = "CG_FlyLV"
     Fly.lv.Attachment0 = Fly.att
@@ -356,16 +405,14 @@ local function ToggleFly(on)
     Fly.lv.VectorVelocity = Vector3.zero
     Fly.lv.Parent = hrp
 
-    -- 对齐朝向 (代替 BodyGyro)
     Fly.ao = Instance.new("AlignOrientation")
     Fly.ao.Name = "CG_FlyAO"
     Fly.ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
     Fly.ao.Attachment0 = Fly.att
     Fly.ao.MaxTorque = 1e5
-    Fly.ao.RigidityEnabled = true -- 刚性对齐，避免镜头转动时角色甩尾
+    Fly.ao.RigidityEnabled = true
     Fly.ao.Parent = hrp
 
-    -- 桌面：Space 升 / Shift 降
     if UIS.KeyboardEnabled then
         Fly.inputBegan = UIS.InputBegan:Connect(function(i, gp)
             if gp then return end
@@ -378,10 +425,8 @@ local function ToggleFly(on)
         end)
     end
 
-    -- 手机：右侧滑动升降
     if IS_TOUCH then setupMobileFlightInput() end
 
-    -- 每帧控制
     Fly.conn = RunService.RenderStepped:Connect(function()
         local c = LP.Character
         local root = c and c:FindFirstChild("HumanoidRootPart")
@@ -395,7 +440,7 @@ local function ToggleFly(on)
         local rightFlat = Vector3.new(camCF.RightVector.X, 0, camCF.RightVector.Z)
         if rightFlat.Magnitude > 1e-4 then rightFlat = rightFlat.Unit end
 
-        -- 1) 水平：读 Roblox 自带摇杆（手机）或键盘 WASD（桌面）
+        -- 水平：读自带摇杆
         local mv = Vector3.zero
         local ctl = getControls()
         if ctl then
@@ -404,41 +449,59 @@ local function ToggleFly(on)
         end
 
         local dir = Vector3.zero
-        dir += lookFlat  * (-mv.Z)     -- 前推 -> 前进；后推 -> 后退
-        dir += rightFlat * ( mv.X)     -- 左 -> 左；右 -> 右
+        dir += lookFlat  * (-mv.Z)
+        dir += rightFlat * ( mv.X)
 
-        -- 2) 垂直：右侧滑动 + 桌面 Space/Shift 叠加
+        -- 垂直：右侧滑动 + 桌面 Space/Shift
         local vy = VertInput
         if upKey   then vy += 1 end
         if downKey then vy -= 1 end
         vy = math.clamp(vy, -1, 1)
-        dir += Vector3.new(0, vy, 0)
+        
+        if vy ~= 0 then
+            dir += camCF.LookVector * vy
+        end
 
-        -- 3) 应用速度
+        -- 应用速度
         if dir.Magnitude > 1e-4 then
             Fly.lv.VectorVelocity = dir.Unit * CONFIG.FlySpeed
         else
             Fly.lv.VectorVelocity = Vector3.zero
         end
 
-        -- 4) 角色保持直立、朝相机水平方向（不会俯仰翻滚）
+        -- 角色朝向
         local yaw = math.atan2(-lookFlat.X, -lookFlat.Z)
         Fly.ao.CFrame = CFrame.new(Vector3.zero) * CFrame.Angles(0, yaw, 0)
+
+        -- ========== 动画状态机 ==========
+        local inputMag = Vector2.new(mv.X, mv.Z).Magnitude
+        local totalMag = math.sqrt(inputMag^2 + vy^2)
+        
+        if totalMag < 0.05 then
+            setFlyAnim("Idle")
+        elseif vy > 0.5 and inputMag < 0.5 then
+            setFlyAnim("Jump") -- 主要往上升
+        elseif vy < -0.5 and inputMag < 0.5 then
+            setFlyAnim("Fall") -- 主要往下降
+        else
+            if inputMag > 0.5 then
+                setFlyAnim("Run") -- 摇杆推得深，快速飞
+            else
+                setFlyAnim("Walk") -- 摇杆推得浅，慢速飞
+            end
+        end
     end)
 end
 
--- ================= ESP（加强回收机制） =================
+-- ================= ESP =================
 local ESPPlayerConn = nil
 local ESPObjects = {}
 
--- 彻底清理某个玩家角色上的 ESP 残留
 local function RemoveESPFromPlayer(player)
     local char = player.Character
     if not char then return end
-    
     local highlight = char:FindFirstChild("CG_ESP_Highlight")
     if highlight then highlight:Destroy() end
-    
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if hrp then
         local billboard = hrp:FindFirstChild("CG_ESP")
@@ -464,7 +527,6 @@ local function AddESP(player)
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
 
-    -- 每次添加前，先确保清理掉旧对象，防止重复叠加
     RemoveESPFromPlayer(player)
 
     local billboard = Instance.new("BillboardGui")
@@ -592,5 +654,5 @@ end)
 -- ================= 提示 =================
 print("[概念神菜单] 已加载。仅限自己的私人体验使用。")
 if IS_TOUCH then
-    print("[概念神菜单] 手机飞行操作：左摇杆 = 前后左右；右侧滑屏 = 上升/下降")
+    print("[概念神菜单] 飞行已升级：包含 R15 通用动作，右侧滑屏可按视角飞行。")
 end
