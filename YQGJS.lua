@@ -1,7 +1,7 @@
 --[[
-    概念神菜单 (Concept God Menu) - 终极修复版 2.0
+    概念神菜单 (Concept God Menu) - 终极修复版 2.1
     文件名: YQGJS.lua
-    修复：移速防回弹、穿墙不遁地
+    修复：移速防回弹、穿墙不遁地、新增【指定锁头目标】功能
 ]]
 
 -- ================= 配置 =================
@@ -37,6 +37,7 @@ local State = {
     Fly=false, ESP=false, Noclip=false, JumpPower=false, Speed=false, Aimbot=false,
 }
 local ESPMode = 1 -- 1: 队伍识别, 2: 全部敌人, 3: 全部友军
+local AimbotTargetPlayer = nil -- 指定的锁头玩家(nil为自动锁敌)
 
 -- ================= 敌友识别 =================
 local function isAlly(player)
@@ -83,8 +84,8 @@ if not okParent then ScreenGui.Parent = LP:WaitForChild("PlayerGui") end
 -- ================= 主窗口 =================
 local Main = Instance.new("Frame")
 Main.Name = "Main"
-Main.Size = UDim2.new(0, 300, 0, 480)
-Main.Position = UDim2.new(0, 20, 0, 90)
+Main.Size = UDim2.new(0, 300, 0, 520) -- 稍微加高容纳新按钮
+Main.Position = UDim2.new(0, 20, 0, 60)
 Main.BackgroundTransparency = 1
 Main.BorderSizePixel = 0
 Main.Active = true
@@ -194,7 +195,7 @@ local folded = false
 FoldBtn.MouseButton1Click:Connect(function()
     folded = not folded
     List.Visible = not folded
-    Main.Size = folded and UDim2.new(0, 300, 0, IS_MOBILE and 48 or 44) or UDim2.new(0, 300, 0, 480)
+    Main.Size = folded and UDim2.new(0, 300, 0, IS_MOBILE and 48 or 44) or UDim2.new(0, 300, 0, 520)
     FoldBtn.Text = folded and "+" or "-"
 end)
 
@@ -369,7 +370,6 @@ local function ToggleFly(on)
         local yaw = math.atan2(-lookFlat.X, -lookFlat.Z)
         Fly.ao.CFrame = CFrame.new(Vector3.zero) * CFrame.Angles(0, yaw, 0)
 
-        -- 动画匹配
         local inputMag = mv.Magnitude
         local isVertical = math.abs(dir.Y) > (Vector2.new(dir.X, dir.Z).Magnitude)
 
@@ -394,29 +394,147 @@ local function ToggleAimbot(on)
 
     RunService:BindToRenderStep("CG_Aimbot", Enum.RenderPriority.Camera.Value + 1, function()
         if not State.Aimbot then return end
-        local closestHead, shortestDist = nil, CONFIG.AimbotFOV
-        local center = Camera.ViewportSize / 2
+        local targetHead = nil
 
-        for _, p in ipairs(Players:GetPlayers()) do
-            if not isAlly(p) and p.Character then
-                local head = p.Character:FindFirstChild("Head")
-                local hum = p.Character:FindFirstChildOfClass("Humanoid")
-                if head and hum and hum.Health > 0 then
-                    local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
-                    if onScreen then
-                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                        if dist < shortestDist then
-                            shortestDist = dist; closestHead = head
+        -- 如果指定了目标且目标存活，则直接锁指定目标
+        if AimbotTargetPlayer and AimbotTargetPlayer.Parent then
+            local char = AimbotTargetPlayer.Character
+            local head = char and char:FindFirstChild("Head")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if head and hum and hum.Health > 0 then
+                targetHead = head
+            end
+        else
+            -- 否则走默认的“最近敌人”逻辑
+            local closestHead, shortestDist = nil, CONFIG.AimbotFOV
+            local center = Camera.ViewportSize / 2
+
+            for _, p in ipairs(Players:GetPlayers()) do
+                if not isAlly(p) and p.Character then
+                    local head = p.Character:FindFirstChild("Head")
+                    local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                    if head and hum and hum.Health > 0 then
+                        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                        if onScreen then
+                            local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                            if dist < shortestDist then
+                                shortestDist = dist; closestHead = head
+                            end
                         end
                     end
                 end
             end
+            targetHead = closestHead
         end
 
-        if closestHead then
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closestHead.Position)
+        -- 执行锁头覆盖
+        if targetHead then
+            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, targetHead.Position)
         end
     end)
+end
+
+-- ================= 锁头目标选择器 UI =================
+local TargetSelectorGui = Instance.new("Frame")
+TargetSelectorGui.Name = "TargetSelector"
+TargetSelectorGui.Size = UDim2.new(0, 260, 0, 350)
+TargetSelectorGui.Position = UDim2.new(0.5, 0, 0.5, 0)
+TargetSelectorGui.AnchorPoint = Vector2.new(0.5, 0.5)
+TargetSelectorGui.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+TargetSelectorGui.BackgroundTransparency = 0.1
+TargetSelectorGui.BorderSizePixel = 0
+TargetSelectorGui.Visible = false
+TargetSelectorGui.ZIndex = 10
+TargetSelectorGui.Parent = ScreenGui
+corner(TargetSelectorGui, 10)
+stroke(TargetSelectorGui, Color3.fromRGB(100, 100, 120), 2)
+
+local TS_Title = Instance.new("TextLabel")
+TS_Title.Size = UDim2.new(1, 0, 0, 40)
+TS_Title.BackgroundTransparency = 1
+TS_Title.Text = "选择锁头目标"
+TS_Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+TS_Title.Font = Enum.Font.GothamBold
+TS_Title.TextSize = 18
+TS_Title.ZIndex = 11
+TS_Title.Parent = TargetSelectorGui
+
+local TS_Close = Instance.new("TextButton")
+TS_Close.Size = UDim2.new(0, 30, 0, 30)
+TS_Close.Position = UDim2.new(1, -35, 0, 5)
+TS_Close.BackgroundColor3 = Color3.fromRGB(190, 55, 55)
+TS_Close.BorderSizePixel = 0
+TS_Close.Text = "X"
+TS_Close.TextColor3 = Color3.fromRGB(255, 255, 255)
+TS_Close.Font = Enum.Font.GothamBold
+TS_Close.TextSize = 14
+TS_Close.ZIndex = 11
+TS_Close.Parent = TargetSelectorGui
+corner(TS_Close, 6)
+TS_Close.MouseButton1Click:Connect(function() TargetSelectorGui.Visible = false end)
+
+local TS_Scroll = Instance.new("ScrollingFrame")
+TS_Scroll.Size = UDim2.new(1, -20, 1, -50)
+TS_Scroll.Position = UDim2.new(0, 10, 0, 40)
+TS_Scroll.BackgroundTransparency = 1
+TS_Scroll.BorderSizePixel = 0
+TS_Scroll.ScrollBarThickness = 4
+TS_Scroll.ZIndex = 11
+TS_Scroll.Parent = TargetSelectorGui
+
+local TS_Layout = Instance.new("UIListLayout")
+TS_Layout.Padding = UDim.new(0, 6)
+TS_Layout.SortOrder = Enum.SortOrder.LayoutOrder
+TS_Layout.Parent = TS_Scroll
+
+local function RefreshTargetList()
+    for _, child in ipairs(TS_Scroll:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+
+    -- 添加“取消指定”按钮
+    local cancelBtn = Instance.new("TextButton")
+    cancelBtn.Size = UDim2.new(1, -6, 0, 40)
+    cancelBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    cancelBtn.Text = "恢复自动锁敌 (取消指定)"
+    cancelBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    cancelBtn.Font = Enum.Font.GothamSemibold
+    cancelBtn.TextSize = 14
+    cancelBtn.ZIndex = 11
+    cancelBtn.Parent = TS_Scroll
+    corner(cancelBtn, 6)
+    cancelBtn.MouseButton1Click:Connect(function()
+        AimbotTargetPlayer = nil
+        Toggles["TargetSelectBtn"](false) -- 更新按钮文字
+        TargetSelectorGui.Visible = false
+    end)
+
+    -- 遍历玩家
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1, -6, 0, 40)
+            btn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+            btn.Text = (p.Name == (AimbotTargetPlayer and AimbotTargetPlayer.Name)) and ("[已锁定] " .. p.Name) or p.Name
+            btn.TextColor3 = isAlly(p) and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
+            btn.Font = Enum.Font.GothamSemibold
+            btn.TextSize = 14
+            btn.ZIndex = 11
+            btn.Parent = TS_Scroll
+            
+            -- 让文字靠左显示
+            btn.TextXAlignment = Enum.TextXAlignment.Left
+            local pad = Instance.new("UIPadding", btn)
+            pad.PaddingLeft = UDim.new(0, 10)
+            
+            corner(btn, 6)
+            btn.MouseButton1Click:Connect(function()
+                AimbotTargetPlayer = p
+                Toggles["TargetSelectBtn"](false) -- 触发一次刷新文字
+                TargetSelectorGui.Visible = false
+            end)
+        end
+    end
 end
 
 -- ================= ESP =================
@@ -487,11 +605,10 @@ local function ToggleESP(on)
     end
 end
 
--- ================= 穿墙 (遁地修复版) =================
+-- ================= 穿墙 =================
 local NoclipConn = nil
 local function ToggleNoclip(on)
     if NoclipConn then NoclipConn:Disconnect(); NoclipConn = nil end
-    
     if not on then
         local char = LP.Character
         if char then
@@ -503,39 +620,32 @@ local function ToggleNoclip(on)
         end
         return
     end
-
-    -- 开启穿墙：仅仅取消碰撞，保留重力（不会遁地），也不强推 Velocity（防回弹）
     NoclipConn = RunService.Stepped:Connect(function()
-        if State.Fly then return end -- 飞行时不走穿墙逻辑，避免冲突
+        if State.Fly then return end
         local c = LP.Character
         if not c then return end
         for _, part in ipairs(c:GetDescendants()) do
-            if part:IsA("BasePart") then 
-                part.CanCollide = false 
-            end
+            if part:IsA("BasePart") then part.CanCollide = false end
         end
     end)
 end
 
--- ================= 移速 (防回弹版) =================
+-- ================= 移速 =================
 local SpeedConn = nil
 local origSpeed
 local function ToggleSpeed(on)
     if SpeedConn then SpeedConn:Disconnect(); SpeedConn = nil end
-    
     local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
     if not hum then return end
-
     if on then
         origSpeed = hum.WalkSpeed
         hum.WalkSpeed = CONFIG.WalkSpeedValue
-        -- 关键：每帧通过 CFrame 极微小瞬移补偿，绕过服务器速度校验
         SpeedConn = RunService.RenderStepped:Connect(function()
             local c = LP.Character
             local h = c and c:FindFirstChildOfClass("Humanoid")
             local root = c and c:FindFirstChild("HumanoidRootPart")
             if h and root and not State.Fly and not State.Noclip then
-                h.WalkSpeed = CONFIG.WalkSpeedValue -- 持续覆盖
+                h.WalkSpeed = CONFIG.WalkSpeedValue
                 if h.MoveDirection.Magnitude > 0.1 then
                     local addSpeed = (CONFIG.WalkSpeedValue - 16) * 0.02
                     root.CFrame = root.CFrame + (h.MoveDirection * addSpeed)
@@ -566,7 +676,38 @@ end)
 CreateToggle("穿墙 (Noclip)", "Noclip", ToggleNoclip)
 CreateToggle("加强跳跃 (Jump)", "JumpPower", ToggleJump)
 CreateToggle("加强移速 (Speed)", "Speed", ToggleSpeed)
+
+-- 锁头开关
 CreateToggle("锁头 (Aimbot)", "Aimbot", ToggleAimbot)
+
+-- 目标选择按钮
+local TargetBtn = Instance.new("TextButton")
+TargetBtn.Size = UDim2.new(1, 0, 0, BTN_H)
+TargetBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+TargetBtn.BorderSizePixel = 0
+TargetBtn.TextColor3 = Color3.fromRGB(235,235,235)
+TargetBtn.Font = Enum.Font.GothamSemibold
+TargetBtn.TextSize = IS_MOBILE and 17 or 15
+TargetBtn.Parent = List
+corner(TargetBtn, 8)
+stroke(TargetBtn, Color3.fromRGB(80,80,100), 1)
+
+TargetBtn.MouseButton1Click:Connect(function()
+    RefreshTargetList()
+    TargetSelectorGui.Visible = true
+end)
+
+-- 动态更新目标按钮的文字
+Toggles["TargetSelectBtn"] = function()
+    if AimbotTargetPlayer then
+        TargetBtn.Text = "当前目标: " .. AimbotTargetPlayer.Name
+        TargetBtn.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
+    else
+        TargetBtn.Text = "选择锁头目标 (当前: 自动)"
+        TargetBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    end
+end
+Toggles["TargetSelectBtn"]() -- 初始化文字
 
 -- ================= 重生处理 =================
 LP.CharacterAdded:Connect(function()
@@ -587,4 +728,4 @@ CloseBtn.MouseButton1Click:Connect(function()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] 已加载终极修复版 2.0！")
+print("[概念神菜单] 已加载！包含目标选择器。")
