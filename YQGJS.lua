@@ -1,6 +1,7 @@
 --[[
     概念神菜单 (Concept God Menu) - 透明背景 / 手机适配版
     文件名: YQGJS.lua
+    特性: 已升级新版物理引擎 (LinearVelocity + AlignOrientation)，加强 ESP 对象回收
     手机飞行：左侧 = Roblox 自带摇杆(前后左右)，右侧滑动 = 升降
 ]]
 
@@ -262,11 +263,10 @@ local function getControls()
     return Controls
 end
 
--- ================= 飞行（重写） =================
+-- ================= 飞行（新版物理约束） =================
 local Fly = {
-    conn = nil, bv = nil, gyro = nil,
+    conn = nil, lv = nil, ao = nil, att = nil,
     inputBegan = nil, inputEnded = nil,
-    cleanup = nil,
 }
 local upKey, downKey = false, false
 
@@ -321,8 +321,9 @@ local function cleanFly()
     if Fly.conn       then Fly.conn:Disconnect();       Fly.conn = nil end
     if Fly.inputBegan then Fly.inputBegan:Disconnect(); Fly.inputBegan = nil end
     if Fly.inputEnded then Fly.inputEnded:Disconnect(); Fly.inputEnded = nil end
-    if Fly.bv         then Fly.bv:Destroy();            Fly.bv = nil end
-    if Fly.gyro       then Fly.gyro:Destroy();          Fly.gyro = nil end
+    if Fly.lv         then Fly.lv:Destroy();            Fly.lv = nil end
+    if Fly.ao         then Fly.ao:Destroy();            Fly.ao = nil end
+    if Fly.att        then Fly.att:Destroy();           Fly.att = nil end
     teardownMobileFlightInput()
     upKey, downKey = false, false
 
@@ -342,18 +343,27 @@ local function ToggleFly(on)
 
     if hum then hum.PlatformStand = true end
 
-    Fly.bv = Instance.new("BodyVelocity")
-    Fly.bv.Name = "CG_FlyBV"
-    Fly.bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-    Fly.bv.Velocity = Vector3.zero
-    Fly.bv.Parent = hrp
+    -- 新版物理移动器：基于 Attachment
+    Fly.att = Instance.new("Attachment")
+    Fly.att.Name = "CG_FlyAtt"
+    Fly.att.Parent = hrp
 
-    Fly.gyro = Instance.new("BodyGyro")
-    Fly.gyro.Name = "CG_FlyGyro"
-    Fly.gyro.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
-    Fly.gyro.P = 2000
-    Fly.gyro.D = 100
-    Fly.gyro.Parent = hrp
+    -- 线性速度 (代替 BodyVelocity)
+    Fly.lv = Instance.new("LinearVelocity")
+    Fly.lv.Name = "CG_FlyLV"
+    Fly.lv.Attachment0 = Fly.att
+    Fly.lv.MaxForce = 1e5
+    Fly.lv.VectorVelocity = Vector3.zero
+    Fly.lv.Parent = hrp
+
+    -- 对齐朝向 (代替 BodyGyro)
+    Fly.ao = Instance.new("AlignOrientation")
+    Fly.ao.Name = "CG_FlyAO"
+    Fly.ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
+    Fly.ao.Attachment0 = Fly.att
+    Fly.ao.MaxTorque = 1e5
+    Fly.ao.RigidityEnabled = true -- 刚性对齐，避免镜头转动时角色甩尾
+    Fly.ao.Parent = hrp
 
     -- 桌面：Space 升 / Shift 降
     if UIS.KeyboardEnabled then
@@ -375,7 +385,7 @@ local function ToggleFly(on)
     Fly.conn = RunService.RenderStepped:Connect(function()
         local c = LP.Character
         local root = c and c:FindFirstChild("HumanoidRootPart")
-        if not root or not Fly.bv or not Fly.gyro then return end
+        if not root or not Fly.lv or not Fly.ao then return end
 
         local cam = workspace.CurrentCamera
         local camCF = cam.CFrame
@@ -406,24 +416,40 @@ local function ToggleFly(on)
 
         -- 3) 应用速度
         if dir.Magnitude > 1e-4 then
-            Fly.bv.Velocity = dir.Unit * CONFIG.FlySpeed
+            Fly.lv.VectorVelocity = dir.Unit * CONFIG.FlySpeed
         else
-            Fly.bv.Velocity = Vector3.zero
+            Fly.lv.VectorVelocity = Vector3.zero
         end
 
         -- 4) 角色保持直立、朝相机水平方向（不会俯仰翻滚）
         local yaw = math.atan2(-lookFlat.X, -lookFlat.Z)
-        Fly.gyro.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
+        Fly.ao.CFrame = CFrame.new(Vector3.zero) * CFrame.Angles(0, yaw, 0)
     end)
-
-    Fly.cleanup = cleanFly
 end
 
--- ================= ESP =================
+-- ================= ESP（加强回收机制） =================
 local ESPPlayerConn = nil
 local ESPObjects = {}
 
+-- 彻底清理某个玩家角色上的 ESP 残留
+local function RemoveESPFromPlayer(player)
+    local char = player.Character
+    if not char then return end
+    
+    local highlight = char:FindFirstChild("CG_ESP_Highlight")
+    if highlight then highlight:Destroy() end
+    
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local billboard = hrp:FindFirstChild("CG_ESP")
+        if billboard then billboard:Destroy() end
+    end
+end
+
 local function ClearESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        RemoveESPFromPlayer(p)
+    end
     for _, obj in ipairs(ESPObjects) do
         if obj and obj.Parent then obj:Destroy() end
     end
@@ -437,8 +463,9 @@ local function AddESP(player)
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    if hrp:FindFirstChild("CG_ESP") then return end
-    if char:FindFirstChild("CG_ESP_Highlight") then return end
+
+    -- 每次添加前，先确保清理掉旧对象，防止重复叠加
+    RemoveESPFromPlayer(player)
 
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "CG_ESP"
