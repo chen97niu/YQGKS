@@ -1,9 +1,9 @@
 --[[
-    概念神菜单 (Concept God Menu) v1.2 - 多级菜单版
+    概念神菜单 (Concept God Menu) v1.3 - 多级菜单版
     文件名: YQGJS.lua
     本版更新:
-      飞行: 移除升降按键 / 手机端 左摇杆=平面移动, 右侧屏幕拖动=转向+升降(回中即悬停)
-            飞行时手机相机接管(可转动视野), PC端保持 Space/Shift 升降
+      新增: 辅助功能页 / 弹飞玩家(触碰即弹飞+击杀, 三档力度: 普通/强力/离谱)
+      飞行: 左摇杆=平移, 右侧屏幕拖动=横转/竖升降(回中即悬停), PC端 WASD+Space/Shift
       修复: 前向声明缺失 / ESP标签键值错误 / UICorner tween 报错 / ESP连接泄漏
       UI:   深色卡片风 / iOS开关 / 页面切换动画 / 按压反馈 / 呼吸状态灯
 ]]
@@ -21,12 +21,14 @@ local CONFIG = {
     FlySpeeds    = {40, 80, 120, 200},
     JumpPowers   = {80, 120, 200, 300},
     WalkSpeeds   = {40, 80, 150, 250},
+    FlingVel     = {250, 500, 1000},   -- 弹飞力度: 普通/强力/离谱
 
     FlySpeedIdx  = 1,
     JumpPowerIdx = 1,
     WalkSpeedIdx = 1,
+    FlingVelIdx  = 1,
 
-    FlyCamDist   = 15,   -- 手机飞行相机距离
+    FlyCamDist   = 15,
 }
 
 local THEME = {
@@ -65,7 +67,7 @@ local IS_MOBILE = IS_TOUCH
 -- ================= 状态 =================
 local State = {
     Fly = false, ESP = false, Noclip = false,
-    JumpPower = false, Speed = false, Aimbot = false,
+    JumpPower = false, Speed = false, Aimbot = false, Fling = false,
 }
 local ESPMode            = 1
 local AimbotTargetPlayer = nil
@@ -73,7 +75,7 @@ local ManualAllies       = {}
 
 -- 前向声明（UI 先引用、后段赋值，闭包调用时取值）
 local ToggleFly, ToggleESP, RefreshESP, ToggleNoclip
-local ToggleSpeed, ToggleJump, ToggleAimbot, RefreshTargetList
+local ToggleSpeed, ToggleJump, ToggleAimbot, ToggleFling, RefreshTargetList
 local TargetSelectorGui, TSScale
 
 -- ================= 敌友识别 =================
@@ -134,7 +136,7 @@ Main.BackgroundColor3 = THEME.Bg
 Main.BackgroundTransparency = 0.12
 Main.BorderSizePixel = 0
 Main.ClipsDescendants = true
-Main.ZIndex = 5 -- ESP连线(2)画在岛背后，不遮挡菜单
+Main.ZIndex = 5
 Main.Parent = ScreenGui
 local mainCorner = corner(Main, 20)
 stroke(Main, THEME.Stroke, 1.5, 0.45)
@@ -232,14 +234,14 @@ local Footer = Instance.new("TextLabel")
 Footer.Size = UDim2.new(1, -16, 0, 18)
 Footer.Position = UDim2.new(0, 8, 1, -24)
 Footer.BackgroundTransparency = 1
-Footer.Text = "Concept God Menu · v1.2"
+Footer.Text = "Concept God Menu · v1.3"
 Footer.TextColor3 = THEME.TextDim
 Footer.Font = Enum.Font.Gotham
 Footer.TextSize = 11
 Footer.TextXAlignment = Enum.TextXAlignment.Center
 Footer.Parent = Main
 
--- 折叠展开（tween UICorner 实例而非 Frame 属性）
+-- 折叠展开
 local expanded = false
 Header.MouseButton1Click:Connect(function()
     expanded = not expanded
@@ -298,6 +300,7 @@ local FlyPage    = CreatePage("Fly")
 local EspPage    = CreatePage("Esp")
 local MovePage   = CreatePage("Move")
 local CombatPage = CreatePage("Combat")
+local AssistPage = CreatePage("Assist")
 
 -- ================= 按钮组件 =================
 local BTN_H = IS_MOBILE and 52 or 44
@@ -524,6 +527,7 @@ CreateNavBtn(HomePage, "✈", "飞行设置", "Fly")
 CreateNavBtn(HomePage, "◎", "透视设置", "Esp")
 CreateNavBtn(HomePage, "⇄", "移动 · 穿墙/移速/跳跃", "Move")
 CreateNavBtn(HomePage, "✜", "战斗 · 锁头", "Combat")
+CreateNavBtn(HomePage, "⚡", "辅助 · 弹飞玩家", "Assist")
 
 -- 飞行页
 CreatePageHeader(FlyPage, "飞行设置")
@@ -621,6 +625,22 @@ Toggles["TargetSelectBtn"] = function()
 end
 Toggles["TargetSelectBtn"]()
 
+-- 【新增】辅助功能页
+CreatePageHeader(AssistPage, "辅助功能")
+CreateToggle(AssistPage, "弹飞玩家 (触碰)", "Fling", function(on) ToggleFling(on) end)
+CreateCycleBtn(AssistPage, "弹飞力度", {"普通", "强力", "离谱"},
+    CONFIG.FlingVelIdx, function(idx) CONFIG.FlingVelIdx = idx end)
+
+local flingHint = Instance.new("TextLabel")
+flingHint.Size = UDim2.new(1, 0, 0, 46)
+flingHint.BackgroundTransparency = 1
+flingHint.TextColor3 = THEME.TextDim
+flingHint.Font = Enum.Font.Gotham
+flingHint.TextSize = 12
+flingHint.TextWrapped = true
+flingHint.Text = "开启后，你贴到的敌人会被弹飞并死亡。\n手动标友与同队玩家不受影响；透视阵营设为「全敌」时可弹所有人。"
+flingHint.Parent = AssistPage
+
 ShowPage("Home")
 
 -- ================= 摇杆读取 =================
@@ -640,7 +660,6 @@ local function getControls()
 end
 
 -- ================= 手机飞行触控（右侧屏幕辅助区） =================
--- 右侧非 GUI 触摸: 横拖 = 转向(相机yaw) / 竖拖 = 升降(相对起点, 回中=悬停)
 local flightTouches = {}
 local flyYaw = 0
 local TouchConns = {}
@@ -757,7 +776,6 @@ function ToggleFly(on)
         local vel, charYaw
 
         if IS_TOUCH then
-            -- 左摇杆 = 纯水平(相对飞行朝向)；右侧拖动 = 转向 + 升降
             local yawCF = CFrame.Angles(0, flyYaw, 0)
             local hDir = yawCF.LookVector * (-mv.Z) + yawCF.RightVector * mv.X
 
@@ -772,14 +790,12 @@ function ToggleFly(on)
             vel = h * speed + Vector3.new(0, climb * speed * 0.8, 0)
             charYaw = flyYaw
 
-            -- 飞行相机：跟随角色，右拖已接管转向（锁头时不覆盖）
             if not State.Aimbot then
                 local look = (yawCF * CFrame.Angles(math.rad(-15), 0, 0)).LookVector
                 local focus = root.Position + Vector3.new(0, 2, 0)
                 Camera.CFrame = CFrame.lookAt(focus - look * CONFIG.FlyCamDist, focus)
             end
         else
-            -- PC：保留原逻辑，朝向相机全方向
             local camCF = Camera.CFrame
             local dir = camCF.LookVector * (-mv.Z) + camCF.RightVector * mv.X
             if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0, 1, 0) end
@@ -794,7 +810,6 @@ function ToggleFly(on)
         Fly.lv.VectorVelocity = vel
         Fly.ao.CFrame = CFrame.Angles(0, charYaw, 0)
 
-        -- 动画：以竖直分量是否占主导判断升/降
         local inputMag = mv.Magnitude
         local horiz = Vector2.new(vel.X, vel.Z).Magnitude
         local vertDom = math.abs(vel.Y) > horiz
@@ -883,7 +898,6 @@ local function StartLinesRenderer()
 
     LinesConn = RunService.RenderStepped:Connect(function()
         if not State.ESP then return end
-        -- 连线起点：灵动岛屏幕中心（AbsolutePosition 已含 UIScale）
         local startPos = Main.AbsolutePosition + Main.AbsoluteSize / 2
         local rainbowColor = Color3.fromHSV((tick() * 0.3) % 1, 1, 1)
 
@@ -969,7 +983,7 @@ function AddESP(player)
     label.TextStrokeTransparency = 0
     label.Font = Enum.Font.GothamBold
     label.TextSize = 14
-    ESPLabels[player] = label -- 按 Player 键存，渲染端才能取到
+    ESPLabels[player] = label
 
     local line = Instance.new("Frame")
     line.Name = "CG_ESP_Line"
@@ -994,7 +1008,6 @@ function ToggleESP(on)
     if not on then return end
     RefreshESP()
 
-    -- 所有连接统一入表，ClearESP 时全断（修复泄漏）
     table.insert(ESPConns, Players.PlayerAdded:Connect(function(p)
         table.insert(ESPConns, p.CharacterAdded:Connect(function()
             task.wait(0.5)
@@ -1014,7 +1027,6 @@ function ToggleESP(on)
     end
 end
 
--- 玩家退出时清理其 ESP 线/标签
 Players.PlayerRemoving:Connect(function(p)
     if ESPLines[p] then ESPLines[p]:Destroy(); ESPLines[p] = nil end
     if ESPLabels[p] then ESPLabels[p]:Destroy(); ESPLabels[p] = nil end
@@ -1220,6 +1232,81 @@ function ToggleJump(on)
     end
 end
 
+-- ================= 【新增】辅助功能：触碰弹飞 =================
+local FlingConns = {}
+local flingCooldown = {}
+
+-- 从被碰的部件反查玩家（兼容身体部件和配饰 Handle）
+local function playerFromHit(hit)
+    if not hit or not hit.Parent then return nil end
+    local p = Players:GetPlayerFromCharacter(hit.Parent)
+    if p then return p, hit.Parent end
+    local up = hit.Parent.Parent
+    if up then
+        local p2 = Players:GetPlayerFromCharacter(up)
+        if p2 then return p2, up end
+    end
+    return nil
+end
+
+local function onFlingTouch(hit)
+    if not State.Fling then return end
+    local myChar = LP.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+
+    local player, char = playerFromHit(hit)
+    if not player or player == LP then return end
+    if isAlly(player) then return end -- 想连友军一起弹就删掉这行
+
+    -- 每人 1.2 秒冷却，防止同一次贴身触发几十次
+    local now = os.clock()
+    if flingCooldown[player] and now - flingCooldown[player] < 1.2 then return end
+    flingCooldown[player] = now
+
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+
+    local root = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+    if not root then return end
+
+    local power = CONFIG.FlingVel[CONFIG.FlingVelIdx] or 300
+
+    -- 弹飞方向：从我指向对方（水平），带向上分量；角速度让它旋转飞出
+    local dir = root.Position - myRoot.Position
+    dir = Vector3.new(dir.X, 0, dir.Z)
+    dir = dir.Magnitude > 0.05 and dir.Unit or myRoot.CFrame.LookVector
+
+    root.AssemblyLinearVelocity = dir * power + Vector3.new(0, power * 0.6, 0)
+    root.AssemblyAngularVelocity = Vector3.new(power, power, power)
+    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
+
+    -- 护盾保护的角色只弹不杀
+    if not char:FindFirstChildOfClass("ForceField") then
+        hum.Health = 0
+    end
+end
+
+local function hookFling(char)
+    local hrp = char:WaitForChild("HumanoidRootPart", 10)
+    if not hrp or not State.Fling then return end
+    table.insert(FlingConns, hrp.Touched:Connect(onFlingTouch))
+end
+
+function ToggleFling(on)
+    for _, c in ipairs(FlingConns) do c:Disconnect() end
+    table.clear(FlingConns)
+    table.clear(flingCooldown)
+    if not on then return end
+
+    if LP.Character then hookFling(LP.Character) end
+    -- 重生后自动重新挂钩
+    table.insert(FlingConns, LP.CharacterAdded:Connect(function(c)
+        task.wait(0.6)
+        if State.Fling then hookFling(c) end
+    end))
+end
+
 -- ================= 重生与清理 =================
 LP.CharacterAdded:Connect(function()
     task.wait(0.8)
@@ -1236,9 +1323,10 @@ CloseBtn.MouseButton1Click:Connect(function()
     if SpeedConn then SpeedConn:Disconnect() end
     if LinesConn then LinesConn:Disconnect() end
     for _, c in ipairs(TouchConns) do c:Disconnect() end
+    for _, c in ipairs(FlingConns) do c:Disconnect() end
     pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
     ClearESP()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] v1.2 已加载：飞行 = 左摇杆平移 + 右屏拖动(横转/竖升降)")
+print("[概念神菜单] v1.3 已加载：辅助功能 → 弹飞玩家")
