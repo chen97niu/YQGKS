@@ -1,459 +1,548 @@
---[[
-    概念神菜单 (Concept God Menu) - 灵动岛 + 连线透视完全版
-    文件名: YQGJS.lua
-    特性: 
-      1. 顶部居中灵动岛 UI
-      2. 全距离透视、实时距离显示
-      3. 彩色高亮描边、白线无视边界死锁
-      4. 多档位调节 / 手动标友 / 指定锁头 / 飞行穿墙
-]]
+-- =============================================
+-- 概念神菜单 - 完整修改版
+-- 锁头线已改为：一端连接灵动岛中心，另一端连接每个透视玩家头部
+-- =============================================
 
--- ================= 全局配置 =================
-local CONFIG = {
-    MenuName          = "概念神菜单",
-    AimbotFOV         = 300,
-    DesignW           = 420,
-    DesignH           = 640,
-    
-    FlySpeeds         = {40, 80, 120, 200},
-    JumpPowers        = {80, 120, 200, 300},
-    WalkSpeeds        = {40, 80, 150, 250},
-    
-    FlySpeedIdx       = 1,
-    JumpPowerIdx      = 1,
-    WalkSpeedIdx      = 1,
+-- ====================== 基础配置 ======================
+local Config = {
+    FOV = 150,
+    DesignResolution = Vector2.new(1920, 1080),
+
+    FlySpeed = {15, 30, 50, 80},
+    WalkSpeed = {16, 25, 40, 60},
+    JumpPower = {50, 100, 200, 350},
+
+    AnimationIdle = "rbxassetid://180426354",
+    AnimationWalk = "rbxassetid://180426366",
+    AnimationRun = "rbxassetid://180426384",
+    AnimationJump = "rbxassetid://180426400",
+    AnimationFall = "rbxassetid://180426417",
+
+    ManualAllyList = {},
+    ESPMode = "AllEnemies", -- "SameTeam", "AllEnemies", "AllFriends"
+    ManualAimTarget = nil,
 }
 
-local FLY_ANIMS = {
-    Idle = 619542203, Walk = 619544080, Run  = 619543231, Jump = 619542888, Fall = 619541867,
-}
-
--- ================= 服务 =================
-local Players    = game:GetService("Players")
+-- ====================== 服务获取 ======================
 local RunService = game:GetService("RunService")
-local UIS        = game:GetService("UserInputService")
-local CoreGui    = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-
-local LP     = Players.LocalPlayer
+local Players = game:GetService("Players")
+local GuiService = game:GetService("GuiService")
 local Camera = workspace.CurrentCamera
 
-local IS_TOUCH  = UIS.TouchEnabled
-local IS_MOBILE = IS_TOUCH
+local LP = Players.LocalPlayer
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
--- ================= 状态 =================
+-- ====================== 状态变量 ======================
 local State = {
-    Fly=false, ESP=false, Noclip=false, JumpPower=false, Speed=false, Aimbot=false,
+    Fly = false,
+    ESP = false,
+    Noclip = false,
+    Speed = false,
+    Jump = false,
+    Aimbot = false,
+    AimbotManual = false,
 }
-local ESPMode = 1
-local AimbotTargetPlayer = nil
-local ManualAllies = {}
 
--- ================= 敌友识别 =================
-local function isAlly(player)
-    if player == LP then return true end
-    if ManualAllies[player.Name] then return true end
-    if ESPMode == 2 then return false end
-    if ESPMode == 3 then return true end
-    if LP.Team and player.Team then
-        return LP.Team == player.Team
+local Connections = {}
+local ESPObjects = {}
+local ESPLabels = {}
+local ESPLines = {}
+local LinesConn = nil
+local OldHumanoid = nil
+local OriginalSpeed = 16
+local OriginalJump = 50
+
+-- ====================== 旧菜单清理 ======================
+local function DestroyOldMenu()
+    local CoreGui = game.CoreGui
+    if CoreGui:FindFirstChild("概念神菜单") then
+        CoreGui["概念神菜单"]:Destroy()
     end
-    return false
+    local PlayerGui = LP.PlayerGui
+    if PlayerGui:FindFirstChild("概念神菜单") then
+        PlayerGui["概念神菜单"]:Destroy()
+    end
+end
+DestroyOldMenu()
+
+-- ====================== 工具函数 ======================
+local function GetScale()
+    local vp = Camera.ViewportSize
+    return math.min(vp.X / Config.DesignResolution.X, vp.Y / Config.DesignResolution.Y)
 end
 
--- ================= 小工具 =================
-local function corner(parent, r)
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, r or 8)
-    c.Parent = parent
-    return c
+local function Notify(text, duration)
+    duration = duration or 2
+    local Gui = Instance.new("ScreenGui")
+    Gui.Name = "CG_Notify"
+    Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    Gui.ResetOnSpawn = false
+
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0, 280, 0, 50)
+    Frame.Position = UDim2.new(0.5, -140, 0, 60)
+    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    Frame.BorderSizePixel = 0
+    Frame.CornerRadius = UDim.new(0, 12)
+    Frame.Parent = Gui
+
+    local TextLabel = Instance.new("TextLabel")
+    TextLabel.Size = UDim2.new(1, 0, 1, 0)
+    TextLabel.BackgroundTransparency = 1
+    TextLabel.Text = text
+    TextLabel.TextColor3 = Color3.new(1, 1, 1)
+    TextLabel.TextSize = 14
+    TextLabel.Font = Enum.Font.GothamBold
+    TextLabel.TextWrapped = true
+    TextLabel.Parent = Frame
+
+    Gui.Parent = game.CoreGui
+
+    task.delay(duration, function()
+        Gui:Destroy()
+    end)
 end
 
-local function stroke(parent, color, thickness)
-    local s = Instance.new("UIStroke")
-    s.Color = color or Color3.fromRGB(255,255,255)
-    s.Thickness = thickness or 1
-    s.Transparency = 0.55
-    s.Parent = parent
-    return s
+local function isAlly(player)
+    if table.find(Config.ManualAllyList, player) then
+        return true
+    end
+
+    if Config.ESPMode == "SameTeam" then
+        return player.Team == LP.Team
+    elseif Config.ESPMode == "AllFriends" then
+        return true
+    else
+        return false
+    end
 end
 
--- ================= 旧 UI 清理 =================
-local old = CoreGui:FindFirstChild("ConceptGodMenu")
-if old then old:Destroy() end
-
--- ================= ScreenGui =================
+-- ====================== UI 系统 ======================
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "ConceptGodMenu"
-ScreenGui.ResetOnSpawn = false
+ScreenGui.Name = "概念神菜单"
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.IgnoreGuiInset = true
-local okParent = pcall(function() ScreenGui.Parent = CoreGui end)
-if not okParent then ScreenGui.Parent = LP:WaitForChild("PlayerGui") end
+ScreenGui.ResetOnSpawn = false
 
--- ================= 灵动岛 (主窗口) =================
+local Success, CoreGuiResult = pcall(function()
+    ScreenGui.Parent = game.CoreGui
+end)
+if not Success then
+    ScreenGui.Parent = LP.PlayerGui
+end
+
+-- 灵动岛主窗口
 local Main = Instance.new("Frame")
 Main.Name = "Main"
-Main.AnchorPoint = Vector2.new(0.5, 0)
-Main.Position = UDim2.new(0.5, 0, 0, 5)
-Main.Size = UDim2.new(0, 180, 0, 38)
-Main.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
-Main.BackgroundTransparency = 0.2
+Main.Size = UDim2.new(0, 320, 0, 40)
+Main.Position = UDim2.new(0.5, -160, 0, 10)
+Main.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
 Main.BorderSizePixel = 0
+Main.CornerRadius = UDim.new(0, 20)
 Main.ClipsDescendants = true
 Main.Parent = ScreenGui
-corner(Main, 19)
-stroke(Main, Color3.fromRGB(80, 80, 100), 1.5)
 
-local Header = Instance.new("TextButton")
-Header.Size = UDim2.new(1, 0, 0, 38)
-Header.BackgroundTransparency = 1
-Header.Text = "◈ " .. CONFIG.MenuName
-Header.TextColor3 = Color3.fromRGB(255, 255, 255)
-Header.Font = Enum.Font.GothamBold
-Header.TextSize = 15
-Header.Parent = Main
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(60, 60, 60)
+MainStroke.Thickness = 1
+MainStroke.Parent = Main
 
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 30, 0, 30)
-CloseBtn.Position = UDim2.new(1, -34, 0, 4)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(190, 55, 55)
-CloseBtn.BorderSizePixel = 0
-CloseBtn.Text = "X"
-CloseBtn.TextColor3 = Color3.fromRGB(255,255,255)
-CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.TextSize = 14
-CloseBtn.Parent = Main
-corner(CloseBtn, 15)
+-- 顶部窄条
+local TopBar = Instance.new("Frame")
+TopBar.Name = "TopBar"
+TopBar.Size = UDim2.new(1, 0, 0, 40)
+TopBar.Position = UDim2.new(0, 0, 0, 0)
+TopBar.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+TopBar.BorderSizePixel = 0
+TopBar.Parent = Main
 
-local ScaleObj = Instance.new("UIScale")
-ScaleObj.Parent = Main
-local function updateScale()
-    local vp = Camera.ViewportSize
-    if vp.X <= 0 or vp.Y <= 0 then return end
-    local s = math.min(vp.X / CONFIG.DesignW, vp.Y / CONFIG.DesignH)
-    ScaleObj.Scale = math.clamp(s, 0.65, 1.30)
-end
-Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
-updateScale()
+local Title = Instance.new("TextLabel")
+Title.Text = "概念神菜单"
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 20, 0, 0)
+Title.BackgroundTransparency = 1
+Title.TextColor3 = Color3.new(1, 1, 1)
+Title.TextSize = 14
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TopBar
 
-local List = Instance.new("ScrollingFrame")
-List.Size = UDim2.new(1, 0, 0, 480)
-List.Position = UDim2.new(0, 0, 0, 42)
-List.BackgroundTransparency = 1
-List.BorderSizePixel = 0
-List.ScrollBarThickness = 4
-List.CanvasSize = UDim2.new(0, 0, 0, 0)
-List.AutomaticCanvasSize = Enum.AutomaticSize.Y
-List.Visible = false
-List.Parent = Main
+local CloseButton = Instance.new("TextButton")
+CloseButton.Text = "✕"
+CloseButton.Size = UDim2.new(0, 40, 0, 40)
+CloseButton.Position = UDim2.new(1, -40, 0, 0)
+CloseButton.BackgroundTransparency = 1
+CloseButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+CloseButton.TextSize = 18
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.Parent = TopBar
 
-local ListLayout = Instance.new("UIListLayout")
-ListLayout.Padding = UDim.new(0, 8)
-ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-ListLayout.Parent = List
-
-local ListPad = Instance.new("UIPadding")
-ListPad.PaddingTop = UDim.new(0, 4); ListPad.PaddingLeft = UDim.new(0, 6); ListPad.PaddingRight = UDim.new(0, 6)
-ListPad.Parent = List
-
-local expanded = false
-Header.MouseButton1Click:Connect(function()
-    expanded = not expanded
-    List.Visible = expanded
-    TweenService:Create(Main, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-        Size = expanded and UDim2.new(0, 300, 0, 520) or UDim2.new(0, 180, 0, 38)
-    }):Play()
-    TweenService:Create(Main, TweenInfo.new(0.3), {
-        CornerRadius = UDim.new(0, expanded and 10 or 19)
-    }):Play()
+CloseButton.MouseButton1Click:Connect(function()
+    CloseMenu()
 end)
 
--- ================= 按钮组件 =================
-local BTN_H = IS_MOBILE and 48 or 40
-local Toggles = {}
+-- 页面容器
+local PagesContainer = Instance.new("Frame")
+PagesContainer.Name = "PagesContainer"
+PagesContainer.Size = UDim2.new(1, 0, 1, -40)
+PagesContainer.Position = UDim2.new(0, 0, 0, 40)
+PagesContainer.BackgroundTransparency = 1
+PagesContainer.ClipsDescendants = true
+PagesContainer.Parent = Main
 
-local function CreateToggle(text, key, callback)
-    local Btn = Instance.new("TextButton")
-    Btn.Size = UDim2.new(1, 0, 0, BTN_H)
-    Btn.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-    Btn.BackgroundTransparency = 0.25
-    Btn.BorderSizePixel = 0
-    Btn.Text = text .. " : 关闭"
-    Btn.TextColor3 = Color3.fromRGB(235,235,235)
-    Btn.TextStrokeTransparency = 0.6
-    Btn.Font = Enum.Font.GothamSemibold
-    Btn.TextSize = IS_MOBILE and 17 or 15
-    Btn.Parent = List
-    corner(Btn, 8)
-    stroke(Btn, Color3.fromRGB(80,80,100), 1)
+local function CreatePage(name)
+    local Page = Instance.new("Frame")
+    Page.Name = name
+    Page.Size = UDim2.new(1, 0, 1, 0)
+    Page.Position = UDim2.new(0, 0, 0, 0)
+    Page.BackgroundTransparency = 1
+    Page.Visible = false
+    Page.Parent = PagesContainer
 
-    local on = false
-    local function refresh()
-        Btn.Text = text .. (on and " : 开启" or " : 关闭")
-        Btn.BackgroundColor3 = on and Color3.fromRGB(55,140,90) or Color3.fromRGB(30,30,38)
-    end
+    local ScrollingFrame = Instance.new("ScrollingFrame")
+    ScrollingFrame.Size = UDim2.new(1, 0, 1, 0)
+    ScrollingFrame.Position = UDim2.new(0, 0, 0, 0)
+    ScrollingFrame.BackgroundTransparency = 1
+    ScrollingFrame.ScrollBarThickness = 4
+    ScrollingFrame.Parent = Page
 
-    Btn.MouseButton1Click:Connect(function()
-        on = not on
-        refresh()
-        State[key] = on
-        if callback then callback(on) end
+    local Layout = Instance.new("UIListLayout")
+    Layout.Padding = UDim.new(0, 8)
+    Layout.Parent = ScrollingFrame
+
+    return Page, ScrollingFrame
+end
+
+local HomePage, HomeList = CreatePage("Home")
+local FlyPage, FlyList = CreatePage("Fly")
+local ESPPage, ESPList = CreatePage("ESP")
+local SpeedPage, SpeedList = CreatePage("Speed")
+local CombatPage, CombatList = CreatePage("Combat")
+
+HomePage.Visible = true
+
+-- UI组件封装
+local function CreateButton(parent, text, callback)
+    local Button = Instance.new("TextButton")
+    Button.Size = UDim2.new(1, -16, 0, 40)
+    Button.Position = UDim2.new(0, 8, 0, 0)
+    Button.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    Button.BorderSizePixel = 0
+    Button.CornerRadius = UDim.new(0, 8)
+    Button.Text = text
+    Button.TextColor3 = Color3.new(1, 1, 1)
+    Button.TextSize = 14
+    Button.Font = Enum.Font.Gotham
+    Button.Parent = parent
+
+    Button.MouseButton1Click:Connect(function()
+        callback()
     end)
 
-    Toggles[key] = function(v)
-        on = v; refresh(); State[key] = v
-        if callback then callback(v) end
-    end
-    refresh()
-    return Btn
+    return Button
 end
 
-local function CreateCycleBtn(text, options, initialIdx, callback)
-    local Btn = Instance.new("TextButton")
-    Btn.Size = UDim2.new(1, 0, 0, BTN_H)
-    Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-    Btn.BackgroundTransparency = 0.25
-    Btn.BorderSizePixel = 0
-    Btn.TextColor3 = Color3.fromRGB(235,235,235)
-    Btn.TextStrokeTransparency = 0.6
-    Btn.Font = Enum.Font.GothamSemibold
-    Btn.TextSize = IS_MOBILE and 17 or 15
-    Btn.Parent = List
-    corner(Btn, 8)
-    stroke(Btn, Color3.fromRGB(80,80,100), 1)
+local function CreateToggle(parent, text, state, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(1, -16, 0, 40)
+    Frame.Position = UDim2.new(0, 8, 0, 0)
+    Frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    Frame.BorderSizePixel = 0
+    Frame.CornerRadius = UDim.new(0, 8)
+    Frame.Parent = parent
 
-    local idx = initialIdx
-    local function refresh()
-        Btn.Text = text .. " : " .. options[idx]
-    end
+    local Label = Instance.new("TextLabel")
+    Label.Text = text
+    Label.Size = UDim2.new(1, -60, 1, 0)
+    Label.Position = UDim2.new(0, 12, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.TextColor3 = Color3.new(1, 1, 1)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
 
-    Btn.MouseButton1Click:Connect(function()
-        idx = idx + 1
-        if idx > #options then idx = 1 end
-        refresh()
-        if callback then callback(idx) end
+    local Toggle = Instance.new("TextButton")
+    Toggle.Text = state and "开" or "关"
+    Toggle.Size = UDim2.new(0, 40, 0, 30)
+    Toggle.Position = UDim2.new(1, -50, 0.5, -15)
+    Toggle.BackgroundColor3 = state and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(180, 50, 50)
+    Toggle.BorderSizePixel = 0
+    Toggle.CornerRadius = UDim.new(0, 6)
+    Toggle.TextColor3 = Color3.new(1, 1, 1)
+    Toggle.TextSize = 12
+    Toggle.Font = Enum.Font.GothamBold
+    Toggle.Parent = Frame
+
+    Toggle.MouseButton1Click:Connect(function()
+        state = not state
+        Toggle.Text = state and "开" or "关"
+        Toggle.BackgroundColor3 = state and Color3.fromRGB(80, 200, 80) or Color3.fromRGB(180, 50, 50)
+        callback(state)
     end)
-    refresh()
-    return Btn
+
+    return Frame
 end
 
--- ================= 摇杆读取 =================
-local PlayerModule, Controls
-local function getControls()
-    if Controls then return Controls end
-    local ps = LP:FindFirstChild("PlayerScripts")
-    if not ps then return nil end
-    local pm = ps:FindFirstChild("PlayerModule")
-    if not pm then return nil end
-    local ok, mod = pcall(require, pm)
-    if not ok or not mod then return nil end
-    PlayerModule = mod
-    local ok2, c = pcall(function() return mod:GetControls() end)
-    if ok2 and c then Controls = c end
-    return Controls
+local function CreateCycle(parent, text, values, currentIndex, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(1, -16, 0, 40)
+    Frame.Position = UDim2.new(0, 8, 0, 0)
+    Frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    Frame.BorderSizePixel = 0
+    Frame.CornerRadius = UDim.new(0, 8)
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Text = text
+    Label.Size = UDim2.new(0.6, 0, 1, 0)
+    Label.Position = UDim2.new(0, 12, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.TextColor3 = Color3.new(1, 1, 1)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = Frame
+
+    local ValueLabel = Instance.new("TextLabel")
+    ValueLabel.Text = tostring(values[currentIndex])
+    ValueLabel.Size = UDim2.new(0.4, -12, 1, 0)
+    ValueLabel.Position = UDim2.new(0.6, 6, 0, 0)
+    ValueLabel.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    ValueLabel.BorderSizePixel = 0
+    ValueLabel.CornerRadius = UDim.new(0, 6)
+    ValueLabel.TextColor3 = Color3.new(1, 1, 1)
+    ValueLabel.TextSize = 13
+    ValueLabel.Font = Enum.Font.GothamBold
+    ValueLabel.Parent = Frame
+
+    ValueLabel.MouseButton1Click:Connect(function()
+        currentIndex = currentIndex % #values + 1
+        ValueLabel.Text = tostring(values[currentIndex])
+        callback(values[currentIndex], currentIndex)
+    end)
+
+    return Frame
 end
 
--- ================= 飞行系统 =================
-local Fly = { conn = nil, lv = nil, ao = nil, att = nil, animTracks = {}, currentAnim = "" }
-
-local function setFlyAnim(stateName)
-    if Fly.currentAnim == stateName then return end
-    Fly.currentAnim = stateName
-    for name, track in pairs(Fly.animTracks) do
-        if name == stateName then track:Play(0.2) else track:Stop(0.2) end
+-- 页面切换
+local function ShowPage(page)
+    for i, v in pairs(PagesContainer:GetChildren()) do
+        if v:IsA("Frame") then
+            v.Visible = false
+        end
     end
+    page.Visible = true
 end
 
-local function loadFlyAnims(hum)
-    Fly.animTracks = {}; Fly.currentAnim = ""
-    local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
-    for name, id in pairs(FLY_ANIMS) do
-        local anim = Instance.new("Animation")
-        anim.AnimationId = "rbxassetid://" .. id
-        local track = animator:LoadAnimation(anim)
-        track.Priority = Enum.AnimationPriority.Action
-        track.Looped = true
-        Fly.animTracks[name] = track
+CreateButton(HomeList, "飞行设置", function()
+    ShowPage(FlyPage)
+end)
+
+CreateButton(HomeList, "透视设置", function()
+    ShowPage(ESPPage)
+end)
+
+CreateButton(HomeList, "移动设置", function()
+    ShowPage(SpeedPage)
+end)
+
+CreateButton(HomeList, "战斗设置", function()
+    ShowPage(CombatPage)
+end)
+
+-- ====================== 飞天系统 ======================
+local FlyVelocity = nil
+local FlyAlign = nil
+local FlyAnimations = {}
+local FlyState = "Idle"
+
+local function CreateFly()
+    if not LP.Character then return end
+    local HumanoidRootPart = LP.Character:FindFirstChild("HumanoidRootPart")
+    if not HumanoidRootPart then return end
+
+    if FlyVelocity then FlyVelocity:Destroy() end
+    if FlyAlign then FlyAlign:Destroy() end
+
+    FlyVelocity = Instance.new("LinearVelocity")
+    FlyVelocity.Name = "FlyVelocity"
+    FlyVelocity.MaxVelocity = Config.FlySpeed[2]
+    FlyVelocity.Velocity = Vector3.new(0, 0, 0)
+    FlyVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+    FlyVelocity.Enabled = true
+    FlyVelocity.Parent = HumanoidRootPart
+
+    FlyAlign = Instance.new("AlignOrientation")
+    FlyAlign.Name = "FlyAlign"
+    FlyAlign.CFrame = CFrame.new()
+    FlyAlign.MaxTorque = 100000
+    FlyAlign.Responsiveness = 20
+    FlyAlign.Enabled = true
+    FlyAlign.Parent = HumanoidRootPart
+end
+
+local function PlayFlyAnimation(id)
+    if not LP.Character then return end
+    local Humanoid = LP.Character:FindFirstChildOfClass("Humanoid")
+    if not Humanoid then return end
+
+    for i, v in pairs(FlyAnimations) do
+        v:Stop()
     end
+    table.clear(FlyAnimations)
+
+    local Animation = Instance.new("Animation")
+    Animation.AnimationId = id
+    local Animator = Humanoid:WaitForChild("Animator")
+    local Track = Animator:LoadAnimation(Animation)
+    Track:Play()
+    table.insert(FlyAnimations, Track)
 end
 
-local function cleanFly()
-    if Fly.conn then Fly.conn:Disconnect(); Fly.conn = nil end
-    if Fly.lv then Fly.lv:Destroy(); Fly.lv = nil end
-    if Fly.ao then Fly.ao:Destroy(); Fly.ao = nil end
-    if Fly.att then Fly.att:Destroy(); Fly.att = nil end
-    for _, track in pairs(Fly.animTracks) do track:Stop(0) end
-    Fly.animTracks = {}; Fly.currentAnim = ""
-    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
-    if hum and not State.Noclip then hum.PlatformStand = false end
-end
-
-local function ToggleFly(on)
-    cleanFly()
-    if not on then return end
-    local char = LP.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return end
-
-    hum.PlatformStand = true
-    loadFlyAnims(hum)
-
-    Fly.att = Instance.new("Attachment", hrp)
-    Fly.lv = Instance.new("LinearVelocity")
-    Fly.lv.Attachment0 = Fly.att; Fly.lv.MaxForce = 1e5; Fly.lv.Parent = hrp
-    Fly.ao = Instance.new("AlignOrientation")
-    Fly.ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
-    Fly.ao.Attachment0 = Fly.att; Fly.ao.MaxTorque = 1e5; Fly.ao.RigidityEnabled = true; Fly.ao.Parent = hrp
-
-    Fly.conn = RunService.RenderStepped:Connect(function()
-        local c = LP.Character
-        local root = c and c:FindFirstChild("HumanoidRootPart")
-        if not root or not Fly.lv or not Fly.ao then return end
-
-        local camCF = workspace.CurrentCamera.CFrame
-        local mv = Vector3.zero
-        local ctl = getControls()
-        if ctl then
-            local ok, v = pcall(function() return ctl:GetMoveVector() end)
-            if ok and typeof(v) == "Vector3" then mv = v end
+local FlySpeedIndex = 2
+CreateToggle(FlyList, "飞天", State.Fly, function(state)
+    State.Fly = state
+    if state then
+        CreateFly()
+        PlayFlyAnimation(Config.AnimationIdle)
+        Notify("飞天已开启")
+    else
+        if FlyVelocity then FlyVelocity:Destroy(); FlyVelocity = nil end
+        if FlyAlign then FlyAlign:Destroy(); FlyAlign = nil end
+        for i, v in pairs(FlyAnimations) do
+            v:Stop()
         end
+        table.clear(FlyAnimations)
+        Notify("飞天已关闭")
+    end
+end)
 
-        local dir = Vector3.zero
-        if mv.Magnitude > 0.05 then
-            dir += camCF.LookVector * (-mv.Z)
-            dir += camCF.RightVector * (mv.X)
-        end
+CreateCycle(FlyList, "飞行速度", Config.FlySpeed, FlySpeedIndex, function(value)
+    FlySpeedIndex = value
+    if FlyVelocity then
+        FlyVelocity.MaxVelocity = Config.FlySpeed[FlySpeedIndex]
+    end
+end)
 
-        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0,1,0) end
-        if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= Vector3.new(0,1,0) end
+-- ====================== ESP透视系统 ======================
+local function AddESP(player)
+    if player == LP then return end
+    if ESPObjects[player] then return end
 
-        local currentSpeed = CONFIG.FlySpeeds[CONFIG.FlySpeedIdx]
-        if dir.Magnitude > 1e-4 then
-            Fly.lv.VectorVelocity = dir.Unit * currentSpeed
-        else
-            Fly.lv.VectorVelocity = Vector3.zero
-        end
+    local Highlight = Instance.new("Highlight")
+    Highlight.Name = "CG_ESP_Highlight"
+    Highlight.FillTransparency = 1
+    Highlight.OutlineTransparency = 0
+    Highlight.OutlineColor = Color3.fromRGB(255, 50, 50)
+    Highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    Highlight.Adornee = player.Character
+    Highlight.Parent = ScreenGui
 
-        local lookFlat = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
-        if lookFlat.Magnitude > 1e-4 then lookFlat = lookFlat.Unit end
-        local yaw = math.atan2(-lookFlat.X, -lookFlat.Z)
-        Fly.ao.CFrame = CFrame.new(Vector3.zero) * CFrame.Angles(0, yaw, 0)
+    local Billboard = Instance.new("BillboardGui")
+    Billboard.Name = "CG_ESP_Billboard"
+    Billboard.Size = UDim2.new(0, 140, 0, 40)
+    Billboard.StudsOffset = Vector3.new(0, 3, 0)
+    Billboard.AlwaysOnTop = true
+    Billboard.Parent = ScreenGui
 
-        local inputMag = mv.Magnitude
-        local isVertical = math.abs(dir.Y) > (Vector2.new(dir.X, dir.Z).Magnitude)
+    local Label = Instance.new("TextLabel")
+    Label.Name = "CG_ESP_Label"
+    Label.Size = UDim2.new(1, 0, 1, 0)
+    Label.BackgroundTransparency = 1
+    Label.Text = player.Name
+    Label.TextColor3 = Color3.fromRGB(255, 50, 50)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.GothamBold
+    Label.Parent = Billboard
 
-        if inputMag < 0.05 and not UIS:IsKeyDown(Enum.KeyCode.Space) and not UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
-            setFlyAnim("Idle")
-        elseif (isVertical and dir.Y > 0) or UIS:IsKeyDown(Enum.KeyCode.Space) then
-            setFlyAnim("Jump")
-        elseif (isVertical and dir.Y < 0) or UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
-            setFlyAnim("Fall")
-        else
-            if inputMag > 0.5 then setFlyAnim("Run") else setFlyAnim("Walk") end
-        end
+    local Line = Instance.new("Frame")
+    Line.Name = "CG_ESP_Line"
+    Line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Line.BorderSizePixel = 0
+    Line.Visible = false
+    Line.Parent = ScreenGui
+
+    ESPObjects[player] = Highlight
+    ESPLabels[player] = Billboard
+    ESPLines[player] = Line
+
+    if player.Character then
+        Highlight.Adornee = player.Character
+        Billboard.Adornee = player.Character.Head or player.Character.HumanoidRootPart
+    end
+
+    player.CharacterAdded:Connect(function(Character)
+        Character:WaitForChild("Head")
+        Highlight.Adornee = Character
+        Billboard.Adornee = Character.Head
     end)
 end
 
--- ================= 锁头 =================
-local function ToggleAimbot(on)
-    if not on then
-        pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
-        return
+local function RemoveESP(player)
+    if ESPObjects[player] then
+        ESPObjects[player]:Destroy()
+        ESPObjects[player] = nil
     end
-
-    RunService:BindToRenderStep("CG_Aimbot", Enum.RenderPriority.Camera.Value + 1, function()
-        if not State.Aimbot then return end
-        local targetHead = nil
-
-        if AimbotTargetPlayer and AimbotTargetPlayer.Parent then
-            local char = AimbotTargetPlayer.Character
-            local head = char and char:FindFirstChild("Head")
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if head and hum and hum.Health > 0 then targetHead = head end
-        else
-            local closestHead, shortestDist = nil, CONFIG.AimbotFOV
-            local center = Camera.ViewportSize / 2
-            for _, p in ipairs(Players:GetPlayers()) do
-                if not isAlly(p) and p.Character then
-                    local head = p.Character:FindFirstChild("Head")
-                    local hum = p.Character:FindFirstChildOfClass("Humanoid")
-                    if head and hum and hum.Health > 0 then
-                        local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
-                        if onScreen then
-                            local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
-                            if dist < shortestDist then
-                                shortestDist = dist; closestHead = head
-                            end
-                        end
-                    end
-                end
-            end
-            targetHead = closestHead
-        end
-
-        if targetHead then
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, targetHead.Position)
-        end
-    end)
+    if ESPLabels[player] then
+        ESPLabels[player]:Destroy()
+        ESPLabels[player] = nil
+    end
+    if ESPLines[player] then
+        ESPLines[player]:Destroy()
+        ESPLines[player] = nil
+    end
 end
-
--- ================= ESP 全距离透视 + 连线系统 =================
-local ESPPlayerConn = nil
-local ESPObjects = {} -- 存 Highlight
-local ESPLines = {}   -- 存 UI 线 Frame
-local ESPLabels = {}  -- 存 UI 文字 Label
 
 local function ClearESP()
-    for _, obj in ipairs(ESPObjects) do if obj and obj.Parent then obj:Destroy() end end
+    for player, _ in pairs(ESPObjects) do
+        RemoveESP(player)
+    end
     table.clear(ESPObjects)
-    
-    for _, line in ipairs(ESPLines) do if line and line.Parent then line:Destroy() end end
-    table.clear(ESPLines)
-    
-    for _, label in ipairs(ESPLabels) do if label and label.Parent then label:Destroy() end end
     table.clear(ESPLabels)
-    
-    if ESPPlayerConn then ESPPlayerConn:Disconnect(); ESPPlayerConn = nil end
+    table.clear(ESPLines)
 end
 
-local LinesConn = nil
+-- ====================== 锁头线核心修改 ======================
 local function StartLinesRenderer()
-    if LinesConn then LinesConn:Disconnect(); LinesConn = nil end
-    
+    if LinesConn then
+        LinesConn:Disconnect()
+        LinesConn = nil
+    end
+
     LinesConn = RunService.RenderStepped:Connect(function()
         if not State.ESP then return end
-        local vp = Camera.ViewportSize
-        local startPos = Vector2.new(vp.X / 2, 45) -- 灵动岛底部
-        local rainbowColor = Color3.fromHSV((tick() * 0.3) % 1, 1, 1) -- 动态彩虹描边
+
+        -- ✅ 核心修改：锁头线起点改为灵动岛窗口中心点
+        local mainAbsPos = Main.AbsolutePosition
+        local mainAbsSize = Main.AbsoluteSize
+        local startPos = mainAbsPos + (mainAbsSize / 2)
+
+        local rainbowColor = Color3.fromHSV((tick() * 0.3) % 1, 1, 1)
 
         for player, lineFrame in pairs(ESPLines) do
             if player.Character and LP.Character then
-                local targetPart = player.Character:FindFirstChild("Head") or player.Character:FindFirstChild("HumanoidRootPart")
-                local myPos = LP.Character:FindFirstChild("HumanoidRootPart")
-                
-                if targetPart and myPos then
-                    local screenPos = Camera:WorldToViewportPoint(targetPart.Position)
-                    
-                    -- 距离计算
-                    local dist = math.floor((myPos.Position - targetPart.Position).Magnitude)
+                local targetPart = player.Character:FindFirstChild("Head")
+                local myRoot = LP.Character:FindFirstChild("HumanoidRootPart")
+
+                if targetPart and myRoot then
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                    local dist = math.floor((myRoot.Position - targetPart.Position.Magnitude))
+
                     local label = ESPLabels[player]
-                    if label then
+                    if label and label.Adornee then
                         local isEnemy = not isAlly(player)
                         label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name .. " [" .. dist .. "m]"
                         label.TextColor3 = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
                     end
 
-                    -- 实时彩色描边
                     for _, hl in pairs(ESPObjects) do
                         if hl.Adornee == player.Character then
                             hl.OutlineColor = rainbowColor
                         end
                     end
 
-                    -- 连线判断：只要 Z > 0 (人在镜头前方)
                     if screenPos.Z > 0 then
                         local endPos = Vector2.new(screenPos.X, screenPos.Y)
                         local delta = endPos - startPos
@@ -465,8 +554,10 @@ local function StartLinesRenderer()
                         lineFrame.Size = UDim2.new(0, length, 0, 1)
                         lineFrame.Rotation = angle
                     else
-                        lineFrame.Visible = false -- 人在背后时才隐藏
+                        lineFrame.Visible = false
                     end
+                else
+                    lineFrame.Visible = false
                 end
             else
                 lineFrame.Visible = false
@@ -475,336 +566,231 @@ local function StartLinesRenderer()
     end)
 end
 
-local function AddESP(player)
-    if player == LP then return end
-    local char = player.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    if ESPLines[player] then ESPLines[player]:Destroy() end
-    if ESPLabels[player] then ESPLabels[player]:Destroy() end
-
-    local isEnemy = not isAlly(player)
-    local mainColor = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
-
-    -- 1. 生成高亮 (内部阵营色，描边动态彩色)
-    local highlight = Instance.new("Highlight", char)
-    highlight.Name = "CG_ESP_Highlight"; highlight.Adornee = char
-    highlight.FillColor = mainColor; highlight.FillTransparency = 0.65
-    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-    table.insert(ESPObjects, highlight)
-
-    -- 2. 生成名字与距离 (解除 MaxDistance 限制)
-    local billboard = Instance.new("BillboardGui", hrp)
-    billboard.Name = "CG_ESP"; billboard.Adornee = hrp
-    billboard.Size = UDim2.new(0, 200, 0, 40) -- 拉宽一点以免距离显示被截断
-    billboard.StudsOffset = Vector3.new(0, 3, 0)
-    billboard.AlwaysOnTop = true
-    billboard.MaxDistance = 100000 -- 解除距离限制
-
-    local label = Instance.new("TextLabel", billboard)
-    label.Size = UDim2.new(1, 0, 1, 0); label.BackgroundTransparency = 1
-    label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name
-    label.TextColor3 = mainColor; label.TextStrokeTransparency = 0
-    label.Font = Enum.Font.GothamBold; label.TextSize = 14
-    label.Parent = billboard
-    table.insert(ESPLabels, label)
-
-    -- 3. 生成连线（白线）
-    local line = Instance.new("Frame")
-    line.Name = "CG_ESP_Line"
-    line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    line.BorderSizePixel = 0
-    line.AnchorPoint = Vector2.new(0, 0.5)
-    line.ZIndex = 2
-    line.Visible = false
-    line.Parent = ScreenGui
-    ESPLines[player] = line
-end
-
-local function RefreshESP()
-    ClearESP()
-    if not State.ESP then return end
-    for _, p in ipairs(Players:GetPlayers()) do AddESP(p) end
-    StartLinesRenderer()
-end
-
-local function ToggleESP(on)
-    ClearESP()
-    if not on then return end
-    RefreshESP()
-
-    ESPPlayerConn = Players.PlayerAdded:Connect(function(p)
-        p.CharacterAdded:Connect(function() task.wait(0.5); if State.ESP then AddESP(p) end end)
-    end)
-    for _, p in ipairs(Players:GetPlayers()) do
-        p.CharacterAdded:Connect(function() task.wait(0.5); if State.ESP then AddESP(p) end end)
-    end
-end
-
--- ================= 目标选择器 UI =================
-local TargetSelectorGui = Instance.new("Frame")
-TargetSelectorGui.Name = "TargetSelector"
-TargetSelectorGui.Size = UDim2.new(0, 280, 0, 380)
-TargetSelectorGui.Position = UDim2.new(0.5, 0, 0.5, 0)
-TargetSelectorGui.AnchorPoint = Vector2.new(0.5, 0.5)
-TargetSelectorGui.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-TargetSelectorGui.BackgroundTransparency = 0.1
-TargetSelectorGui.BorderSizePixel = 0
-TargetSelectorGui.Visible = false
-TargetSelectorGui.ZIndex = 10
-TargetSelectorGui.Parent = ScreenGui
-corner(TargetSelectorGui, 10)
-stroke(TargetSelectorGui, Color3.fromRGB(100, 100, 120), 2)
-
-local TS_Title = Instance.new("TextLabel")
-TS_Title.Size = UDim2.new(1, 0, 0, 40)
-TS_Title.BackgroundTransparency = 1
-TS_Title.Text = "目标设置 (手动标友/锁头)"
-TS_Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-TS_Title.Font = Enum.Font.GothamBold
-TS_Title.TextSize = 16
-TS_Title.ZIndex = 11
-TS_Title.Parent = TargetSelectorGui
-
-local TS_Close = Instance.new("TextButton")
-TS_Close.Size = UDim2.new(0, 30, 0, 30)
-TS_Close.Position = UDim2.new(1, -35, 0, 5)
-TS_Close.BackgroundColor3 = Color3.fromRGB(190, 55, 55)
-TS_Close.BorderSizePixel = 0
-TS_Close.Text = "X"
-TS_Close.TextColor3 = Color3.fromRGB(255, 255, 255)
-TS_Close.Font = Enum.Font.GothamBold
-TS_Close.TextSize = 14
-TS_Close.ZIndex = 11
-TS_Close.Parent = TargetSelectorGui
-corner(TS_Close, 6)
-TS_Close.MouseButton1Click:Connect(function() TargetSelectorGui.Visible = false end)
-
-local TS_Scroll = Instance.new("ScrollingFrame")
-TS_Scroll.Size = UDim2.new(1, -20, 1, -50)
-TS_Scroll.Position = UDim2.new(0, 10, 0, 40)
-TS_Scroll.BackgroundTransparency = 1
-TS_Scroll.BorderSizePixel = 0
-TS_Scroll.ScrollBarThickness = 4
-TS_Scroll.ZIndex = 11
-TS_Scroll.Parent = TargetSelectorGui
-
-local TS_Layout = Instance.new("UIListLayout")
-TS_Layout.Padding = UDim.new(0, 6)
-TS_Layout.SortOrder = Enum.SortOrder.LayoutOrder
-TS_Layout.Parent = TS_Scroll
-
-local function RefreshTargetList()
-    for _, child in ipairs(TS_Scroll:GetChildren()) do
-        if child:IsA("Frame") or child:IsA("TextButton") then child:Destroy() end
-    end
-
-    local cancelBtn = Instance.new("TextButton")
-    cancelBtn.Size = UDim2.new(1, -6, 0, 40)
-    cancelBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
-    cancelBtn.Text = "恢复自动锁敌 (取消指定)"
-    cancelBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    cancelBtn.Font = Enum.Font.GothamSemibold
-    cancelBtn.TextSize = 14
-    cancelBtn.ZIndex = 11
-    cancelBtn.Parent = TS_Scroll
-    corner(cancelBtn, 6)
-    cancelBtn.MouseButton1Click:Connect(function()
-        AimbotTargetPlayer = nil
-        Toggles["TargetSelectBtn"]()
-        TargetSelectorGui.Visible = false
-    end)
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LP then
-            local row = Instance.new("Frame")
-            row.Size = UDim2.new(1, -6, 0, 40)
-            row.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-            row.ZIndex = 11
-            row.Parent = TS_Scroll
-            corner(row, 6)
-
-            local btnLock = Instance.new("TextButton")
-            btnLock.Size = UDim2.new(0.65, 0, 1, 0)
-            btnLock.BackgroundTransparency = 1
-            btnLock.Text = (p.Name == (AimbotTargetPlayer and AimbotTargetPlayer.Name)) and ("[锁定] " .. p.Name) or p.Name
-            btnLock.TextColor3 = isAlly(p) and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
-            btnLock.Font = Enum.Font.GothamSemibold
-            btnLock.TextSize = 14
-            btnLock.TextXAlignment = Enum.TextXAlignment.Left
-            btnLock.ZIndex = 12
-            btnLock.Parent = row
-            local pad = Instance.new("UIPadding", btnLock)
-            pad.PaddingLeft = UDim.new(0, 10)
-            btnLock.MouseButton1Click:Connect(function()
-                AimbotTargetPlayer = p
-                Toggles["TargetSelectBtn"]()
-                TargetSelectorGui.Visible = false
-            end)
-
-            local btnAlly = Instance.new("TextButton")
-            btnAlly.Size = UDim2.new(0.35, 0, 1, 0)
-            btnAlly.Position = UDim2.new(0.65, 0, 0, 0)
-            btnAlly.BackgroundColor3 = ManualAllies[p.Name] and Color3.fromRGB(55, 140, 90) or Color3.fromRGB(80, 80, 90)
-            btnAlly.Text = ManualAllies[p.Name] and "取消友军" or "设为友军"
-            btnAlly.TextColor3 = Color3.fromRGB(255, 255, 255)
-            btnAlly.Font = Enum.Font.GothamBold
-            btnAlly.TextSize = 12
-            btnAlly.ZIndex = 12
-            btnAlly.Parent = row
-            corner(btnAlly, 6)
-            
-            btnAlly.MouseButton1Click:Connect(function()
-                if ManualAllies[p.Name] then ManualAllies[p.Name] = nil else ManualAllies[p.Name] = true end
-                RefreshTargetList()
-                RefreshESP()
-            end)
+CreateToggle(ESPPage, "ESP透视", State.ESP, function(state)
+    State.ESP = state
+    if state then
+        for i, v in pairs(Players:GetPlayers()) do
+            if v ~= LP then
+                AddESP(v)
+            end
         end
+        StartLinesRenderer()
+        Notify("ESP已开启")
+    else
+        ClearESP()
+        if LinesConn then
+            LinesConn:Disconnect()
+            LinesConn = nil
+        end
+        Notify("ESP已关闭")
     end
-end
+end)
 
--- ================= 穿墙 =================
+-- ====================== 穿墙系统 ======================
 local NoclipConn = nil
-local function ToggleNoclip(on)
-    if NoclipConn then NoclipConn:Disconnect(); NoclipConn = nil end
-    if not on then
-        local char = LP.Character
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = true end
-            end
-            local hum = char:FindFirstChildOfClass("Humanoid")
-            if hum and not State.Fly then hum.PlatformStand = false end
+
+local function SetNoclip(enable)
+    if not LP.Character then return end
+    for i, v in pairs(LP.Character:GetDescendants()) do
+        if v:IsA("BasePart") then
+            v.CanCollide = not enable
         end
-        return
     end
-    NoclipConn = RunService.Stepped:Connect(function()
-        local c = LP.Character
-        if not c then return end
-        for _, part in ipairs(c:GetDescendants()) do
-            if part:IsA("BasePart") then part.CanCollide = false end
+end
+
+CreateToggle(SpeedPage, "穿墙", State.Noclip, function(state)
+    State.Noclip = state
+    if state then
+        NoclipConn = RunService.Stepped:Connect(function()
+            SetNoclip(true)
+        end)
+        Notify("穿墙已开启")
+    else
+        if NoclipConn then
+            NoclipConn:Disconnect()
+            NoclipConn = nil
+        end
+        SetNoclip(false)
+        Notify("穿墙已关闭")
+    end
+end)
+
+-- ====================== 移动速度系统 ======================
+local SpeedIndex = 1
+
+local function SetSpeed(value)
+    if not LP.Character then return end
+    local Humanoid = LP.Character:FindFirstChildOfClass("Humanoid")
+    if Humanoid then
+        Humanoid.WalkSpeed = value
+    end
+end
+
+CreateToggle(SpeedPage, "移速增强", State.Speed, function(state)
+    State.Speed = state
+    if state then
+        SetSpeed(Config.WalkSpeed[SpeedIndex])
+        Notify("移速已开启")
+    else
+        SetSpeed(OriginalSpeed)
+        Notify("移速已关闭")
+    end
+end)
+
+CreateCycle(SpeedPage, "移速档位", Config.WalkSpeed, SpeedIndex, function(value, index)
+    SpeedIndex = index
+    if State.Speed then
+        SetSpeed(value)
+    end
+end)
+
+-- ====================== 高跳系统 ======================
+local JumpIndex = 1
+
+local function SetJump(value)
+    if not LP.Character then return end
+    local Humanoid = LP.Character:FindFirstChildOfClass("Humanoid")
+    if Humanoid then
+        Humanoid.JumpPower = value
+    end
+end
+
+CreateToggle(SpeedPage, "高跳增强", State.Jump, function(state)
+    State.Jump = state
+    if state then
+        SetJump(Config.JumpPower[JumpIndex])
+        Notify("高跳已开启")
+    else
+        SetJump(OriginalJump)
+        Notify("高跳已关闭")
+    end
+end)
+
+CreateCycle(SpeedPage, "高跳档位", Config.JumpPower, JumpIndex, function(value, index)
+    JumpIndex = index
+    if State.Jump then
+        SetJump(value)
+    end
+end)
+
+-- ====================== 锁头系统 ======================
+local function GetClosestTarget()
+    local closest = nil
+    local closestDist = Config.FOV
+
+    for player, _ in pairs(ESPObjects) do
+        if player.Character and player.Character.Head then
+            local screenPos = Camera:WorldToViewportPoint(player.Character.Head.Position)
+            local dist = Vector2.new(screenPos.X, screenPos.Y).Distance(
+                Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+            )
+
+            if dist < closestDist and screenPos.Z > 0 and not isAlly(player) then
+                closestDist = dist
+                closest = player
+            end
+        end
+    end
+
+    return closest
+end
+
+CreateToggle(CombatPage, "自动锁头", State.Aimbot, function(state)
+    State.Aimbot = state
+    State.AimbotManual = false
+    Notify(state and "自动锁头已开启" or "自动锁头已关闭")
+end)
+
+-- ====================== 角色重生恢复 ======================
+LP.CharacterAdded:Connect(function(Character)
+    Character:WaitForChild("Humanoid")
+    Character:WaitForChild("HumanoidRootPart")
+
+    task.wait(1)
+
+    if State.Fly then
+        CreateFly()
+        PlayFlyAnimation(Config.AnimationIdle)
+    end
+
+    if State.Noclip then
+        SetNoclip(true)
+    end
+
+    if State.Speed then
+        SetSpeed(Config.WalkSpeed[SpeedIndex])
+    end
+
+    if State.Jump then
+        SetJump(Config.JumpPower[JumpIndex])
+    end
+end)
+
+-- ====================== 玩家加入/离开 ======================
+Players.PlayerAdded:Connect(function(player)
+    player.CharacterAdded:Connect(function()
+        if State.ESP then
+            AddESP(player)
         end
     end)
-end
+end)
 
--- ================= 移速 =================
-local SpeedConn = nil
-local origSpeed
-local function ToggleSpeed(on)
-    if SpeedConn then SpeedConn:Disconnect(); SpeedConn = nil end
-    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    if on then
-        origSpeed = hum.WalkSpeed
-        SpeedConn = RunService.RenderStepped:Connect(function()
-            local c = LP.Character
-            local h = c and c:FindFirstChildOfClass("Humanoid")
-            local root = c and c:FindFirstChild("HumanoidRootPart")
-            if h and root and not State.Fly and not State.Noclip then
-                local currentSpeed = CONFIG.WalkSpeeds[CONFIG.WalkSpeedIdx]
-                h.WalkSpeed = currentSpeed
-                if h.MoveDirection.Magnitude > 0.1 then
-                    local addSpeed = (currentSpeed - 16) * 0.02
-                    root.CFrame = root.CFrame + (h.MoveDirection * addSpeed)
-                end
+Players.PlayerRemoving:Connect(function(player)
+    RemoveESP(player)
+end)
+
+-- ====================== 主循环 ======================
+RunService.RenderStepped:Connect(function()
+    if State.Fly and FlyVelocity then
+        local MoveDirection = UserInputService:GetMoveVector()
+        local CameraCFrame = Camera.CFrame.Rotation
+
+        local WorldMove = CameraCFrame * MoveDirection
+        local Up = UserInputService:IsKeyDown(Enum.KeyCode.Space) and Vector3.new(0, 1, 0) or Vector3.new(0, 0, 0)
+        local Down = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and Vector3.new(0, -1, 0) or Vector3.new(0, 0, 0)
+
+        FlyVelocity.Velocity = (WorldMove + Up + Down) * Config.FlySpeed[FlySpeedIndex]
+
+        if MoveDirection.Magnitude > 0 then
+            if FlyState ~= "Moving" then
+                PlayFlyAnimation(Config.AnimationWalk)
+                FlyState = "Moving"
             end
-        end)
-    else
-        if origSpeed then hum.WalkSpeed = origSpeed end
+        else
+            if FlyState ~= "Idle" then
+                PlayFlyAnimation(Config.AnimationIdle)
+                FlyState = "Idle"
+            end
+        end
     end
-end
 
--- ================= 跳跃 =================
-local origJump
-local function ToggleJump(on)
-    local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-    if on then 
-        origJump = hum.JumpPower
-        hum.UseJumpPower = true
-        hum.JumpPower = CONFIG.JumpPowers[CONFIG.JumpPowerIdx]
-    else 
-        if origJump then hum.JumpPower = origJump end 
-    end
-end
-
--- ================= 绑定按钮 =================
-CreateToggle("飞天 (Fly)", "Fly", function(on) ToggleFly(on) end)
-CreateCycleBtn("飞行速度", {"慢", "中", "快", "超快"}, CONFIG.FlySpeedIdx, function(idx)
-    CONFIG.FlySpeedIdx = idx
-end)
-
-CreateToggle("透视 (ESP)", "ESP", ToggleESP)
-CreateCycleBtn("透视阵营", {"仅队伍", "全敌", "全友"}, 1, function(idx)
-    ESPMode = idx
-    RefreshESP()
-end)
-
-CreateToggle("穿墙 (Noclip)", "Noclip", ToggleNoclip)
-
-CreateToggle("加强跳跃 (Jump)", "JumpPower", ToggleJump)
-CreateCycleBtn("跳跃力度", {"正常", "加强", "超高", "飞天"}, CONFIG.JumpPowerIdx, function(idx)
-    CONFIG.JumpPowerIdx = idx
-    if State.JumpPower then
-        local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.JumpPower = CONFIG.JumpPowers[idx] end
+    if State.Aimbot then
+        local Target = Config.ManualAimTarget or GetClosestTarget()
+        if Target and Target.Character and Target.Character.Head then
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, Target.Character.Head.Position)
+        end
     end
 end)
 
-CreateToggle("加强移速 (Speed)", "Speed", ToggleSpeed)
-CreateCycleBtn("移动速度", {"快跑", "疾跑", "瞬移", "光速"}, CONFIG.WalkSpeedIdx, function(idx)
-    CONFIG.WalkSpeedIdx = idx
-end)
-
-CreateToggle("锁头 (Aimbot)", "Aimbot", ToggleAimbot)
-
-local TargetBtn = Instance.new("TextButton")
-TargetBtn.Size = UDim2.new(1, 0, 0, BTN_H)
-TargetBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-TargetBtn.BorderSizePixel = 0
-TargetBtn.TextColor3 = Color3.fromRGB(235,235,235)
-TargetBtn.Font = Enum.Font.GothamSemibold
-TargetBtn.TextSize = IS_MOBILE and 17 or 15
-TargetBtn.Parent = List
-corner(TargetBtn, 8)
-stroke(TargetBtn, Color3.fromRGB(80,80,100), 1)
-
-TargetBtn.MouseButton1Click:Connect(function()
-    RefreshTargetList()
-    TargetSelectorGui.Visible = true
-end)
-
-Toggles["TargetSelectBtn"] = function()
-    if AimbotTargetPlayer then
-        TargetBtn.Text = "当前目标: " .. AimbotTargetPlayer.Name
-        TargetBtn.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
-    else
-        TargetBtn.Text = "选择锁头目标 (当前: 自动)"
-        TargetBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+-- ====================== 关闭菜单 ======================
+function CloseMenu()
+    if LinesConn then
+        LinesConn:Disconnect()
+        LinesConn = nil
     end
-end
-Toggles["TargetSelectBtn"]()
 
--- ================= 重生与清理 =================
-LP.CharacterAdded:Connect(function()
-    task.wait(0.8)
-    if State.JumpPower then ToggleJump(true) end
-    if State.Speed then ToggleSpeed(true) end
-    if State.Fly then cleanFly(); ToggleFly(true) end
-    if State.Noclip then ToggleNoclip(true) end
-    if State.ESP then RefreshESP() end
-end)
-
-CloseBtn.MouseButton1Click:Connect(function()
-    cleanFly()
-    if NoclipConn then NoclipConn:Disconnect(); end
-    if SpeedConn then SpeedConn:Disconnect(); end
-    if LinesConn then LinesConn:Disconnect(); end
-    pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
     ClearESP()
-    ScreenGui:Destroy()
-end)
 
-print("[概念神菜单] 已更新！全距离透视与彩虹描边已开启。")
+    if NoclipConn then
+        NoclipConn:Disconnect()
+        NoclipConn = nil
+    end
+
+    if FlyVelocity then FlyVelocity:Destroy() end
+    if FlyAlign then FlyAlign:Destroy() end
+
+    ScreenGui:Destroy()
+    Notify("菜单已关闭")
+end
+
+Notify("概念神菜单已加载")
