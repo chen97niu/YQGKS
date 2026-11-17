@@ -1,10 +1,11 @@
 --[[
-    概念神菜单 (Concept God Menu) - 灵动岛 + 连线透视版
+    概念神菜单 (Concept God Menu) - 灵动岛 + 连线透视完全版
     文件名: YQGJS.lua
     特性: 
       1. 顶部居中灵动岛 UI
-      2. ESP 连线透视（白线直连灵动岛）
-      3. 多档位调节 / 手动标友 / 指定锁头 / 飞行穿墙
+      2. 全距离透视、实时距离显示
+      3. 彩色高亮描边、白线无视边界死锁
+      4. 多档位调节 / 手动标友 / 指定锁头 / 飞行穿墙
 ]]
 
 -- ================= 全局配置 =================
@@ -93,19 +94,17 @@ if not okParent then ScreenGui.Parent = LP:WaitForChild("PlayerGui") end
 -- ================= 灵动岛 (主窗口) =================
 local Main = Instance.new("Frame")
 Main.Name = "Main"
--- 固定在屏幕正上方居中
 Main.AnchorPoint = Vector2.new(0.5, 0)
 Main.Position = UDim2.new(0.5, 0, 0, 5)
-Main.Size = UDim2.new(0, 180, 0, 38) -- 默认折叠大小
+Main.Size = UDim2.new(0, 180, 0, 38)
 Main.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
 Main.BackgroundTransparency = 0.2
 Main.BorderSizePixel = 0
 Main.ClipsDescendants = true
 Main.Parent = ScreenGui
-corner(Main, 19) -- 胶囊圆角
+corner(Main, 19)
 stroke(Main, Color3.fromRGB(80, 80, 100), 1.5)
 
--- 灵动岛标题栏 (点击展开)
 local Header = Instance.new("TextButton")
 Header.Size = UDim2.new(1, 0, 0, 38)
 Header.BackgroundTransparency = 1
@@ -115,7 +114,6 @@ Header.Font = Enum.Font.GothamBold
 Header.TextSize = 15
 Header.Parent = Main
 
--- 关闭按钮（在灵动岛右侧）
 local CloseBtn = Instance.new("TextButton")
 CloseBtn.Size = UDim2.new(0, 30, 0, 30)
 CloseBtn.Position = UDim2.new(1, -34, 0, 4)
@@ -128,7 +126,6 @@ CloseBtn.TextSize = 14
 CloseBtn.Parent = Main
 corner(CloseBtn, 15)
 
--- 自适应缩放
 local ScaleObj = Instance.new("UIScale")
 ScaleObj.Parent = Main
 local function updateScale()
@@ -140,7 +137,6 @@ end
 Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
 updateScale()
 
--- ================= 功能列表 =================
 local List = Instance.new("ScrollingFrame")
 List.Size = UDim2.new(1, 0, 0, 480)
 List.Position = UDim2.new(0, 0, 0, 42)
@@ -149,7 +145,7 @@ List.BorderSizePixel = 0
 List.ScrollBarThickness = 4
 List.CanvasSize = UDim2.new(0, 0, 0, 0)
 List.AutomaticCanvasSize = Enum.AutomaticSize.Y
-List.Visible = false -- 默认隐藏
+List.Visible = false
 List.Parent = Main
 
 local ListLayout = Instance.new("UIListLayout")
@@ -404,10 +400,11 @@ local function ToggleAimbot(on)
     end)
 end
 
--- ================= ESP 连线系统 =================
+-- ================= ESP 全距离透视 + 连线系统 =================
 local ESPPlayerConn = nil
-local ESPObjects = {} -- 存 Billboards 和 Highlights
+local ESPObjects = {} -- 存 Highlight
 local ESPLines = {}   -- 存 UI 线 Frame
+local ESPLabels = {}  -- 存 UI 文字 Label
 
 local function ClearESP()
     for _, obj in ipairs(ESPObjects) do if obj and obj.Parent then obj:Destroy() end end
@@ -416,10 +413,12 @@ local function ClearESP()
     for _, line in ipairs(ESPLines) do if line and line.Parent then line:Destroy() end end
     table.clear(ESPLines)
     
+    for _, label in ipairs(ESPLabels) do if label and label.Parent then label:Destroy() end end
+    table.clear(ESPLabels)
+    
     if ESPPlayerConn then ESPPlayerConn:Disconnect(); ESPPlayerConn = nil end
 end
 
--- 核心：在 RenderStepped 中动态更新每一条线的位置和角度
 local LinesConn = nil
 local function StartLinesRenderer()
     if LinesConn then LinesConn:Disconnect(); LinesConn = nil end
@@ -427,18 +426,35 @@ local function StartLinesRenderer()
     LinesConn = RunService.RenderStepped:Connect(function()
         if not State.ESP then return end
         local vp = Camera.ViewportSize
-        -- 线的起点：屏幕顶部中心稍微偏下一点点（灵动岛底部）
-        local startPos = Vector2.new(vp.X / 2, 45)
+        local startPos = Vector2.new(vp.X / 2, 45) -- 灵动岛底部
+        local rainbowColor = Color3.fromHSV((tick() * 0.3) % 1, 1, 1) -- 动态彩虹描边
 
         for player, lineFrame in pairs(ESPLines) do
-            if player.Character then
-                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
-                local head = player.Character:FindFirstChild("Head")
-                local targetPart = head or hrp
+            if player.Character and LP.Character then
+                local targetPart = player.Character:FindFirstChild("Head") or player.Character:FindFirstChild("HumanoidRootPart")
+                local myPos = LP.Character:FindFirstChild("HumanoidRootPart")
                 
-                if targetPart then
-                    local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
-                    if onScreen then
+                if targetPart and myPos then
+                    local screenPos = Camera:WorldToViewportPoint(targetPart.Position)
+                    
+                    -- 距离计算
+                    local dist = math.floor((myPos.Position - targetPart.Position).Magnitude)
+                    local label = ESPLabels[player]
+                    if label then
+                        local isEnemy = not isAlly(player)
+                        label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name .. " [" .. dist .. "m]"
+                        label.TextColor3 = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+                    end
+
+                    -- 实时彩色描边
+                    for _, hl in pairs(ESPObjects) do
+                        if hl.Adornee == player.Character then
+                            hl.OutlineColor = rainbowColor
+                        end
+                    end
+
+                    -- 连线判断：只要 Z > 0 (人在镜头前方)
+                    if screenPos.Z > 0 then
                         local endPos = Vector2.new(screenPos.X, screenPos.Y)
                         local delta = endPos - startPos
                         local length = delta.Magnitude
@@ -446,10 +462,10 @@ local function StartLinesRenderer()
 
                         lineFrame.Visible = true
                         lineFrame.Position = UDim2.new(0, startPos.X, 0, startPos.Y)
-                        lineFrame.Size = UDim2.new(0, length, 0, 1) -- 1像素粗
+                        lineFrame.Size = UDim2.new(0, length, 0, 1)
                         lineFrame.Rotation = angle
                     else
-                        lineFrame.Visible = false -- 不在屏幕上就隐藏
+                        lineFrame.Visible = false -- 人在背后时才隐藏
                     end
                 end
             else
@@ -466,35 +482,39 @@ local function AddESP(player)
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
 
-    -- 防止重复生成
     if ESPLines[player] then ESPLines[player]:Destroy() end
+    if ESPLabels[player] then ESPLabels[player]:Destroy() end
 
     local isEnemy = not isAlly(player)
     local mainColor = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
-    local outlineColor = isEnemy and Color3.fromRGB(255, 100, 100) or Color3.fromRGB(100, 255, 100)
 
-    -- 1. 生成高亮
+    -- 1. 生成高亮 (内部阵营色，描边动态彩色)
     local highlight = Instance.new("Highlight", char)
     highlight.Name = "CG_ESP_Highlight"; highlight.Adornee = char
-    highlight.FillColor = mainColor; highlight.FillTransparency = 0.65; highlight.OutlineColor = outlineColor
+    highlight.FillColor = mainColor; highlight.FillTransparency = 0.65
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
     table.insert(ESPObjects, highlight)
 
-    -- 2. 生成名字
+    -- 2. 生成名字与距离 (解除 MaxDistance 限制)
     local billboard = Instance.new("BillboardGui", hrp)
-    billboard.Name = "CG_ESP"; billboard.Adornee = hrp; billboard.Size = UDim2.new(0, 100, 0, 40)
-    billboard.StudsOffset = Vector3.new(0, 3, 0); billboard.AlwaysOnTop = true
+    billboard.Name = "CG_ESP"; billboard.Adornee = hrp
+    billboard.Size = UDim2.new(0, 200, 0, 40) -- 拉宽一点以免距离显示被截断
+    billboard.StudsOffset = Vector3.new(0, 3, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = 100000 -- 解除距离限制
 
     local label = Instance.new("TextLabel", billboard)
     label.Size = UDim2.new(1, 0, 1, 0); label.BackgroundTransparency = 1
     label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name
     label.TextColor3 = mainColor; label.TextStrokeTransparency = 0
     label.Font = Enum.Font.GothamBold; label.TextSize = 14
-    table.insert(ESPObjects, billboard)
+    label.Parent = billboard
+    table.insert(ESPLabels, label)
 
     -- 3. 生成连线（白线）
     local line = Instance.new("Frame")
     line.Name = "CG_ESP_Line"
-    line.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- 白线
+    line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     line.BorderSizePixel = 0
     line.AnchorPoint = Vector2.new(0, 0.5)
     line.ZIndex = 2
@@ -639,7 +659,7 @@ local function RefreshTargetList()
             btnAlly.MouseButton1Click:Connect(function()
                 if ManualAllies[p.Name] then ManualAllies[p.Name] = nil else ManualAllies[p.Name] = true end
                 RefreshTargetList()
-                RefreshESP() -- 刷新颜色和连线
+                RefreshESP()
             end)
         end
     end
@@ -787,4 +807,4 @@ CloseBtn.MouseButton1Click:Connect(function()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] 已加载！灵动岛与白线透视已就绪。")
+print("[概念神菜单] 已更新！全距离透视与彩虹描边已开启。")
