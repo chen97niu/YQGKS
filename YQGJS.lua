@@ -1,38 +1,59 @@
 --[[
-    概念神菜单 (Concept God Menu) - 灵动岛 + 连线透视完全版
+    概念神菜单 (Concept God Menu) v1.2 - 多级菜单版
     文件名: YQGJS.lua
-    特性: 
-      1. 顶部居中灵动岛 UI
-      2. 全距离透视、实时距离显示
-      3. 彩色高亮描边、白线无视边界死锁
-      4. 多档位调节 / 手动标友 / 指定锁头 / 飞行穿墙
+    本版更新:
+      飞行: 移除升降按键 / 手机端 左摇杆=平面移动, 右侧屏幕拖动=转向+升降(回中即悬停)
+            飞行时手机相机接管(可转动视野), PC端保持 Space/Shift 升降
+      修复: 前向声明缺失 / ESP标签键值错误 / UICorner tween 报错 / ESP连接泄漏
+      UI:   深色卡片风 / iOS开关 / 页面切换动画 / 按压反馈 / 呼吸状态灯
 ]]
 
 -- ================= 全局配置 =================
 local CONFIG = {
-    MenuName          = "概念神菜单",
-    AimbotFOV         = 300,
-    DesignW           = 420,
-    DesignH           = 640,
-    
-    FlySpeeds         = {40, 80, 120, 200},
-    JumpPowers        = {80, 120, 200, 300},
-    WalkSpeeds        = {40, 80, 150, 250},
-    
-    FlySpeedIdx       = 1,
-    JumpPowerIdx      = 1,
-    WalkSpeedIdx      = 1,
+    MenuName     = "概念神菜单",
+    AimbotFOV    = 300,
+    DesignW      = 420,
+    DesignH      = 640,
+
+    EXPANDED_W   = 300,
+    EXPANDED_H   = 536,
+
+    FlySpeeds    = {40, 80, 120, 200},
+    JumpPowers   = {80, 120, 200, 300},
+    WalkSpeeds   = {40, 80, 150, 250},
+
+    FlySpeedIdx  = 1,
+    JumpPowerIdx = 1,
+    WalkSpeedIdx = 1,
+
+    FlyCamDist   = 15,   -- 手机飞行相机距离
+}
+
+local THEME = {
+    Bg        = Color3.fromRGB(12, 12, 16),
+    Card      = Color3.fromRGB(30, 30, 38),
+    CardPress = Color3.fromRGB(44, 44, 55),
+    Accent    = Color3.fromRGB(0, 255, 170),
+    On        = Color3.fromRGB(0, 200, 140),
+    SwitchOff = Color3.fromRGB(58, 58, 70),
+    Text      = Color3.fromRGB(240, 240, 245),
+    TextDim   = Color3.fromRGB(155, 155, 170),
+    Danger    = Color3.fromRGB(235, 70, 70),
+    Stroke    = Color3.fromRGB(70, 70, 90),
+    Red       = Color3.fromRGB(255, 50, 50),
+    Green     = Color3.fromRGB(50, 255, 50),
 }
 
 local FLY_ANIMS = {
-    Idle = 619542203, Walk = 619544080, Run  = 619543231, Jump = 619542888, Fall = 619541867,
+    Idle = 619542203, Walk = 619544080, Run = 619543231,
+    Jump = 619542888, Fall = 619541867,
 }
 
 -- ================= 服务 =================
-local Players    = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UIS        = game:GetService("UserInputService")
-local CoreGui    = game:GetService("CoreGui")
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
+local CoreGui      = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
 
 local LP     = Players.LocalPlayer
@@ -43,11 +64,17 @@ local IS_MOBILE = IS_TOUCH
 
 -- ================= 状态 =================
 local State = {
-    Fly=false, ESP=false, Noclip=false, JumpPower=false, Speed=false, Aimbot=false,
+    Fly = false, ESP = false, Noclip = false,
+    JumpPower = false, Speed = false, Aimbot = false,
 }
-local ESPMode = 1
+local ESPMode            = 1
 local AimbotTargetPlayer = nil
-local ManualAllies = {}
+local ManualAllies       = {}
+
+-- 前向声明（UI 先引用、后段赋值，闭包调用时取值）
+local ToggleFly, ToggleESP, RefreshESP, ToggleNoclip
+local ToggleSpeed, ToggleJump, ToggleAimbot, RefreshTargetList
+local TargetSelectorGui, TSScale
 
 -- ================= 敌友识别 =================
 local function isAlly(player)
@@ -69,13 +96,19 @@ local function corner(parent, r)
     return c
 end
 
-local function stroke(parent, color, thickness)
+local function stroke(parent, color, thickness, transparency)
     local s = Instance.new("UIStroke")
-    s.Color = color or Color3.fromRGB(255,255,255)
+    s.Color = color or THEME.Stroke
     s.Thickness = thickness or 1
-    s.Transparency = 0.55
+    s.Transparency = transparency or 0.55
     s.Parent = parent
     return s
+end
+
+local function attachPress(btn, base, pressed)
+    btn.MouseButton1Down:Connect(function() btn.BackgroundColor3 = pressed end)
+    btn.MouseButton1Up:Connect(function() btn.BackgroundColor3 = base end)
+    btn.MouseLeave:Connect(function() btn.BackgroundColor3 = base end)
 end
 
 -- ================= 旧 UI 清理 =================
@@ -91,141 +124,377 @@ ScreenGui.IgnoreGuiInset = true
 local okParent = pcall(function() ScreenGui.Parent = CoreGui end)
 if not okParent then ScreenGui.Parent = LP:WaitForChild("PlayerGui") end
 
--- ================= 灵动岛 (主窗口) =================
+-- ================= 灵动岛主窗口 =================
 local Main = Instance.new("Frame")
 Main.Name = "Main"
 Main.AnchorPoint = Vector2.new(0.5, 0)
 Main.Position = UDim2.new(0.5, 0, 0, 5)
-Main.Size = UDim2.new(0, 180, 0, 38)
-Main.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
-Main.BackgroundTransparency = 0.2
+Main.Size = UDim2.new(0, 180, 0, 40)
+Main.BackgroundColor3 = THEME.Bg
+Main.BackgroundTransparency = 0.12
 Main.BorderSizePixel = 0
 Main.ClipsDescendants = true
+Main.ZIndex = 5 -- ESP连线(2)画在岛背后，不遮挡菜单
 Main.Parent = ScreenGui
-corner(Main, 19)
-stroke(Main, Color3.fromRGB(80, 80, 100), 1.5)
+local mainCorner = corner(Main, 20)
+stroke(Main, THEME.Stroke, 1.5, 0.45)
+
+local mainGrad = Instance.new("UIGradient")
+mainGrad.Color = ColorSequence.new(Color3.fromRGB(24, 24, 30), Color3.fromRGB(10, 10, 14))
+mainGrad.Rotation = 90
+mainGrad.Parent = Main
+
+local StatusDot = Instance.new("Frame")
+StatusDot.Size = UDim2.new(0, 8, 0, 8)
+StatusDot.Position = UDim2.new(0, 16, 0.5, -4)
+StatusDot.BackgroundColor3 = THEME.Accent
+StatusDot.BorderSizePixel = 0
+StatusDot.Parent = Main
+corner(StatusDot, 4)
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        local t = TweenService:Create(StatusDot,
+            TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+            {BackgroundTransparency = 0.75})
+        t:Play() t.Completed:Wait()
+        if not ScreenGui.Parent then break end
+        local t2 = TweenService:Create(StatusDot,
+            TweenInfo.new(1.2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+            {BackgroundTransparency = 0})
+        t2:Play() t2.Completed:Wait()
+    end
+end)
 
 local Header = Instance.new("TextButton")
-Header.Size = UDim2.new(1, 0, 0, 38)
+Header.Size = UDim2.new(1, 0, 0, 40)
 Header.BackgroundTransparency = 1
 Header.Text = "◈ " .. CONFIG.MenuName
-Header.TextColor3 = Color3.fromRGB(255, 255, 255)
+Header.TextColor3 = THEME.Text
 Header.Font = Enum.Font.GothamBold
 Header.TextSize = 15
+Header.TextXAlignment = Enum.TextXAlignment.Left
+local headerPad = Instance.new("UIPadding", Header)
+headerPad.PaddingLeft = UDim.new(0, 30)
 Header.Parent = Main
 
+local HeaderLine = Instance.new("Frame")
+HeaderLine.Size = UDim2.new(1, -20, 0, 1)
+HeaderLine.Position = UDim2.new(0, 10, 0, 40)
+HeaderLine.BackgroundColor3 = THEME.Stroke
+HeaderLine.BackgroundTransparency = 0.5
+HeaderLine.BorderSizePixel = 0
+HeaderLine.Parent = Main
+
 local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 30, 0, 30)
-CloseBtn.Position = UDim2.new(1, -34, 0, 4)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(190, 55, 55)
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -33, 0, 6)
+CloseBtn.BackgroundColor3 = THEME.Danger
+CloseBtn.BackgroundTransparency = 0.15
 CloseBtn.BorderSizePixel = 0
-CloseBtn.Text = "X"
-CloseBtn.TextColor3 = Color3.fromRGB(255,255,255)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
 CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.TextSize = 14
+CloseBtn.TextSize = 12
+CloseBtn.ZIndex = 6
 CloseBtn.Parent = Main
-corner(CloseBtn, 15)
+corner(CloseBtn, 14)
 
 local ScaleObj = Instance.new("UIScale")
 ScaleObj.Parent = Main
+
 local function updateScale()
     local vp = Camera.ViewportSize
     if vp.X <= 0 or vp.Y <= 0 then return end
     local s = math.min(vp.X / CONFIG.DesignW, vp.Y / CONFIG.DesignH)
     ScaleObj.Scale = math.clamp(s, 0.65, 1.30)
+    if TSScale then
+        TSScale.Scale = math.clamp(s * 1.05, 0.80, 1.10)
+    end
 end
 Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
 updateScale()
 
+-- ================= 菜单列表 + 页脚 =================
 local List = Instance.new("ScrollingFrame")
-List.Size = UDim2.new(1, 0, 0, 480)
-List.Position = UDim2.new(0, 0, 0, 42)
+List.Size = UDim2.new(1, -10, 0, CONFIG.EXPANDED_H - 46 - 26)
+List.Position = UDim2.new(0, 0, 0, 46)
 List.BackgroundTransparency = 1
 List.BorderSizePixel = 0
-List.ScrollBarThickness = 4
+List.ScrollBarThickness = 3
+List.ScrollBarImageColor3 = THEME.Accent
 List.CanvasSize = UDim2.new(0, 0, 0, 0)
 List.AutomaticCanvasSize = Enum.AutomaticSize.Y
 List.Visible = false
 List.Parent = Main
 
-local ListLayout = Instance.new("UIListLayout")
-ListLayout.Padding = UDim.new(0, 8)
-ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-ListLayout.Parent = List
+local Footer = Instance.new("TextLabel")
+Footer.Size = UDim2.new(1, -16, 0, 18)
+Footer.Position = UDim2.new(0, 8, 1, -24)
+Footer.BackgroundTransparency = 1
+Footer.Text = "Concept God Menu · v1.2"
+Footer.TextColor3 = THEME.TextDim
+Footer.Font = Enum.Font.Gotham
+Footer.TextSize = 11
+Footer.TextXAlignment = Enum.TextXAlignment.Center
+Footer.Parent = Main
 
-local ListPad = Instance.new("UIPadding")
-ListPad.PaddingTop = UDim.new(0, 4); ListPad.PaddingLeft = UDim.new(0, 6); ListPad.PaddingRight = UDim.new(0, 6)
-ListPad.Parent = List
-
+-- 折叠展开（tween UICorner 实例而非 Frame 属性）
 local expanded = false
 Header.MouseButton1Click:Connect(function()
     expanded = not expanded
     List.Visible = expanded
-    TweenService:Create(Main, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-        Size = expanded and UDim2.new(0, 300, 0, 520) or UDim2.new(0, 180, 0, 38)
+    TweenService:Create(Main,
+        TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+        Size = expanded and UDim2.new(0, CONFIG.EXPANDED_W, 0, CONFIG.EXPANDED_H)
+                       or UDim2.new(0, 180, 0, 40)
     }):Play()
-    TweenService:Create(Main, TweenInfo.new(0.3), {
-        CornerRadius = UDim.new(0, expanded and 10 or 19)
+    TweenService:Create(mainCorner, TweenInfo.new(0.3), {
+        CornerRadius = UDim.new(0, expanded and 12 or 20)
     }):Play()
 end)
 
+-- ================= 分页系统 =================
+local Pages = {}
+local function ShowPage(pageName)
+    for name, frame in pairs(Pages) do
+        frame.Visible = (name == pageName)
+    end
+    List.CanvasPosition = Vector2.new(0, 0)
+    local p = Pages[pageName]
+    if p then
+        p.GroupTransparency = 1
+        p.Position = UDim2.new(0, 6, 0, 14)
+        TweenService:Create(p,
+            TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            GroupTransparency = 0,
+            Position = UDim2.new(0, 6, 0, 4)
+        }):Play()
+    end
+end
+
+local function CreatePage(pageName)
+    local p = Instance.new("CanvasGroup")
+    p.Name = pageName .. "Page"
+    p.Size = UDim2.new(1, -12, 0, 0)
+    p.Position = UDim2.new(0, 6, 0, 4)
+    p.AutomaticSize = Enum.AutomaticSize.Y
+    p.BackgroundTransparency = 1
+    p.BorderSizePixel = 0
+    p.Visible = false
+    p.Parent = List
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = p
+
+    Pages[pageName] = p
+    return p
+end
+
+local HomePage   = CreatePage("Home")
+local FlyPage    = CreatePage("Fly")
+local EspPage    = CreatePage("Esp")
+local MovePage   = CreatePage("Move")
+local CombatPage = CreatePage("Combat")
+
 -- ================= 按钮组件 =================
-local BTN_H = IS_MOBILE and 48 or 40
+local BTN_H = IS_MOBILE and 52 or 44
 local Toggles = {}
 
-local function CreateToggle(text, key, callback)
+local function CreateNavBtn(parent, icon, text, targetPage)
     local Btn = Instance.new("TextButton")
     Btn.Size = UDim2.new(1, 0, 0, BTN_H)
-    Btn.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-    Btn.BackgroundTransparency = 0.25
+    Btn.BackgroundColor3 = THEME.Card
     Btn.BorderSizePixel = 0
-    Btn.Text = text .. " : 关闭"
-    Btn.TextColor3 = Color3.fromRGB(235,235,235)
-    Btn.TextStrokeTransparency = 0.6
-    Btn.Font = Enum.Font.GothamSemibold
-    Btn.TextSize = IS_MOBILE and 17 or 15
-    Btn.Parent = List
-    corner(Btn, 8)
-    stroke(Btn, Color3.fromRGB(80,80,100), 1)
+    Btn.Text = ""
+    Btn.AutoButtonColor = false
+    Btn.Parent = parent
+    corner(Btn, 10)
+    stroke(Btn, THEME.Stroke, 1, 0.6)
+    attachPress(Btn, THEME.Card, THEME.CardPress)
+
+    local ic = Instance.new("TextLabel")
+    ic.Size = UDim2.new(0, 24, 1, 0)
+    ic.Position = UDim2.new(0, 14, 0, 0)
+    ic.BackgroundTransparency = 1
+    ic.Text = icon
+    ic.TextSize = IS_MOBILE and 20 or 18
+    ic.Font = Enum.Font.GothamBold
+    ic.TextColor3 = THEME.Accent
+    ic.Parent = Btn
+
+    local ttl = Instance.new("TextLabel")
+    ttl.Size = UDim2.new(1, -80, 1, 0)
+    ttl.Position = UDim2.new(0, 44, 0, 0)
+    ttl.BackgroundTransparency = 1
+    ttl.Text = text
+    ttl.TextColor3 = THEME.Text
+    ttl.Font = Enum.Font.GothamSemibold
+    ttl.TextSize = IS_MOBILE and 16 or 14
+    ttl.TextXAlignment = Enum.TextXAlignment.Left
+    ttl.TextTruncate = Enum.TextTruncate.AtEnd
+    ttl.Parent = Btn
+
+    local arrow = Instance.new("TextLabel")
+    arrow.Size = UDim2.new(0, 20, 1, 0)
+    arrow.AnchorPoint = Vector2.new(1, 0.5)
+    arrow.Position = UDim2.new(1, -14, 0.5, 0)
+    arrow.BackgroundTransparency = 1
+    arrow.Text = "›"
+    arrow.TextColor3 = THEME.TextDim
+    arrow.Font = Enum.Font.GothamBold
+    arrow.TextSize = 18
+    arrow.Parent = Btn
+
+    Btn.MouseButton1Click:Connect(function() ShowPage(targetPage) end)
+    return Btn
+end
+
+local function CreatePageHeader(parent, title)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 34)
+    row.BackgroundTransparency = 1
+    row.Parent = parent
+
+    local back = Instance.new("TextButton")
+    back.Size = UDim2.new(0, 92, 1, 0)
+    back.BackgroundTransparency = 1
+    back.Text = "‹ 返回"
+    back.TextColor3 = THEME.Accent
+    back.Font = Enum.Font.GothamSemibold
+    back.TextSize = 15
+    back.TextXAlignment = Enum.TextXAlignment.Left
+    local pad = Instance.new("UIPadding", back)
+    pad.PaddingLeft = UDim.new(0, 2)
+    back.Parent = row
+    back.MouseButton1Click:Connect(function() ShowPage("Home") end)
+
+    local ttl = Instance.new("TextLabel")
+    ttl.Size = UDim2.new(1, -100, 1, 0)
+    ttl.Position = UDim2.new(0, 100, 0, 0)
+    ttl.BackgroundTransparency = 1
+    ttl.Text = title
+    ttl.TextColor3 = THEME.TextDim
+    ttl.Font = Enum.Font.GothamBold
+    ttl.TextSize = 15
+    ttl.TextXAlignment = Enum.TextXAlignment.Right
+    ttl.Parent = row
+    return row
+end
+
+local function CreateToggle(parent, text, key, callback)
+    local Btn = Instance.new("TextButton")
+    Btn.Size = UDim2.new(1, 0, 0, BTN_H)
+    Btn.BackgroundColor3 = THEME.Card
+    Btn.BorderSizePixel = 0
+    Btn.Text = ""
+    Btn.AutoButtonColor = false
+    Btn.Parent = parent
+    corner(Btn, 10)
+    stroke(Btn, THEME.Stroke, 1, 0.6)
+    attachPress(Btn, THEME.Card, THEME.CardPress)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -70, 1, 0)
+    lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = THEME.Text
+    lbl.Font = Enum.Font.GothamSemibold
+    lbl.TextSize = IS_MOBILE and 16 or 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    lbl.Parent = Btn
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0, 36, 0, 20)
+    track.AnchorPoint = Vector2.new(1, 0.5)
+    track.Position = UDim2.new(1, -14, 0.5, 0)
+    track.BackgroundColor3 = THEME.SwitchOff
+    track.BorderSizePixel = 0
+    track.Parent = Btn
+    corner(track, 10)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.AnchorPoint = Vector2.new(0, 0.5)
+    knob.Position = UDim2.new(0, 2, 0.5, 0)
+    knob.BackgroundColor3 = Color3.fromRGB(200, 200, 210)
+    knob.BorderSizePixel = 0
+    knob.Parent = track
+    corner(knob, 8)
 
     local on = false
-    local function refresh()
-        Btn.Text = text .. (on and " : 开启" or " : 关闭")
-        Btn.BackgroundColor3 = on and Color3.fromRGB(55,140,90) or Color3.fromRGB(30,30,38)
+    local swTween = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local function refresh(animate)
+        local knobPos = UDim2.new(0, on and 18 or 2, 0.5, 0)
+        local knobCol = on and THEME.Accent or Color3.fromRGB(200, 200, 210)
+        local trackCol = on and THEME.On or THEME.SwitchOff
+        if animate then
+            TweenService:Create(track, swTween, {BackgroundColor3 = trackCol}):Play()
+            TweenService:Create(knob, swTween, {Position = knobPos, BackgroundColor3 = knobCol}):Play()
+        else
+            track.BackgroundColor3 = trackCol
+            knob.Position = knobPos
+            knob.BackgroundColor3 = knobCol
+        end
     end
 
     Btn.MouseButton1Click:Connect(function()
         on = not on
-        refresh()
+        refresh(true)
         State[key] = on
         if callback then callback(on) end
     end)
 
     Toggles[key] = function(v)
-        on = v; refresh(); State[key] = v
+        on = v; refresh(false); State[key] = v
         if callback then callback(v) end
     end
-    refresh()
+    refresh(false)
     return Btn
 end
 
-local function CreateCycleBtn(text, options, initialIdx, callback)
+local function CreateCycleBtn(parent, text, options, initialIdx, callback)
     local Btn = Instance.new("TextButton")
     Btn.Size = UDim2.new(1, 0, 0, BTN_H)
-    Btn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-    Btn.BackgroundTransparency = 0.25
+    Btn.BackgroundColor3 = THEME.Card
     Btn.BorderSizePixel = 0
-    Btn.TextColor3 = Color3.fromRGB(235,235,235)
-    Btn.TextStrokeTransparency = 0.6
-    Btn.Font = Enum.Font.GothamSemibold
-    Btn.TextSize = IS_MOBILE and 17 or 15
-    Btn.Parent = List
-    corner(Btn, 8)
-    stroke(Btn, Color3.fromRGB(80,80,100), 1)
+    Btn.Text = ""
+    Btn.AutoButtonColor = false
+    Btn.Parent = parent
+    corner(Btn, 10)
+    stroke(Btn, THEME.Stroke, 1, 0.6)
+    attachPress(Btn, THEME.Card, THEME.CardPress)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -110, 1, 0)
+    lbl.Position = UDim2.new(0, 14, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = THEME.Text
+    lbl.Font = Enum.Font.GothamSemibold
+    lbl.TextSize = IS_MOBILE and 16 or 14
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    lbl.Parent = Btn
+
+    local val = Instance.new("TextLabel")
+    val.Size = UDim2.new(0, 100, 1, 0)
+    val.AnchorPoint = Vector2.new(1, 0.5)
+    val.Position = UDim2.new(1, -14, 0.5, 0)
+    val.BackgroundTransparency = 1
+    val.TextColor3 = THEME.Accent
+    val.Font = Enum.Font.GothamBold
+    val.TextSize = IS_MOBILE and 15 or 14
+    val.TextXAlignment = Enum.TextXAlignment.Right
+    val.Parent = Btn
 
     local idx = initialIdx
     local function refresh()
-        Btn.Text = text .. " : " .. options[idx]
+        val.Text = "‹ " .. tostring(options[idx]) .. " ›"
     end
 
     Btn.MouseButton1Click:Connect(function()
@@ -237,6 +506,122 @@ local function CreateCycleBtn(text, options, initialIdx, callback)
     refresh()
     return Btn
 end
+
+-- ================= 构建页面 =================
+
+-- 主页
+local homeTitle = Instance.new("TextLabel")
+homeTitle.Size = UDim2.new(1, 0, 0, 22)
+homeTitle.BackgroundTransparency = 1
+homeTitle.Text = "功能分类"
+homeTitle.TextColor3 = THEME.TextDim
+homeTitle.TextXAlignment = Enum.TextXAlignment.Left
+homeTitle.Font = Enum.Font.GothamBold
+homeTitle.TextSize = 13
+homeTitle.Parent = HomePage
+
+CreateNavBtn(HomePage, "✈", "飞行设置", "Fly")
+CreateNavBtn(HomePage, "◎", "透视设置", "Esp")
+CreateNavBtn(HomePage, "⇄", "移动 · 穿墙/移速/跳跃", "Move")
+CreateNavBtn(HomePage, "✜", "战斗 · 锁头", "Combat")
+
+-- 飞行页
+CreatePageHeader(FlyPage, "飞行设置")
+CreateToggle(FlyPage, "飞天 (Fly)", "Fly", function(on) ToggleFly(on) end)
+CreateCycleBtn(FlyPage, "飞行速度", {"慢", "中", "快", "超快"},
+    CONFIG.FlySpeedIdx, function(idx) CONFIG.FlySpeedIdx = idx end)
+
+local flyHint = Instance.new("TextLabel")
+flyHint.Size = UDim2.new(1, 0, 0, IS_MOBILE and 46 or 34)
+flyHint.BackgroundTransparency = 1
+flyHint.TextColor3 = THEME.TextDim
+flyHint.Font = Enum.Font.Gotham
+flyHint.TextSize = 12
+flyHint.TextWrapped = true
+flyHint.Text = IS_MOBILE
+    and "操作：左摇杆 = 前后左右平移\n右侧屏幕拖动 = 横拖转向 / 竖拖升降，回中即悬停"
+    or "操作：WASD 移动 · Space 上升 · Shift 下降"
+flyHint.Parent = FlyPage
+
+-- 透视页
+CreatePageHeader(EspPage, "透视设置")
+CreateToggle(EspPage, "透视 (ESP)", "ESP", function(on) ToggleESP(on) end)
+CreateCycleBtn(EspPage, "透视阵营", {"仅队伍", "全敌", "全友"}, 1, function(idx)
+    ESPMode = idx
+    RefreshESP()
+end)
+
+-- 移动页
+CreatePageHeader(MovePage, "移动设置")
+CreateToggle(MovePage, "穿墙 (Noclip)", "Noclip", function(on) ToggleNoclip(on) end)
+CreateToggle(MovePage, "加强移速 (Speed)", "Speed", function(on) ToggleSpeed(on) end)
+CreateCycleBtn(MovePage, "移动速度", {"快跑", "疾跑", "瞬移", "光速"},
+    CONFIG.WalkSpeedIdx, function(idx) CONFIG.WalkSpeedIdx = idx end)
+CreateToggle(MovePage, "加强跳跃 (Jump)", "JumpPower", function(on) ToggleJump(on) end)
+CreateCycleBtn(MovePage, "跳跃力度", {"正常", "加强", "超高", "飞天"},
+    CONFIG.JumpPowerIdx, function(idx)
+        CONFIG.JumpPowerIdx = idx
+        if State.JumpPower then
+            local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+            if hum then hum.JumpPower = CONFIG.JumpPowers[idx] end
+        end
+    end)
+
+-- 战斗页
+CreatePageHeader(CombatPage, "战斗设置")
+CreateToggle(CombatPage, "锁头 (Aimbot)", "Aimbot", function(on) ToggleAimbot(on) end)
+
+local TargetBtn = Instance.new("TextButton")
+TargetBtn.Size = UDim2.new(1, 0, 0, BTN_H)
+TargetBtn.BackgroundColor3 = THEME.Card
+TargetBtn.BorderSizePixel = 0
+TargetBtn.Text = ""
+TargetBtn.AutoButtonColor = false
+TargetBtn.Parent = CombatPage
+corner(TargetBtn, 10)
+stroke(TargetBtn, THEME.Stroke, 1, 0.6)
+attachPress(TargetBtn, THEME.Card, THEME.CardPress)
+
+local TargetLbl = Instance.new("TextLabel")
+TargetLbl.Size = UDim2.new(1, -28, 1, 0)
+TargetLbl.Position = UDim2.new(0, 14, 0, 0)
+TargetLbl.BackgroundTransparency = 1
+TargetLbl.Text = "选择锁头目标 (当前: 自动)"
+TargetLbl.TextColor3 = THEME.Text
+TargetLbl.Font = Enum.Font.GothamSemibold
+TargetLbl.TextSize = IS_MOBILE and 16 or 14
+TargetLbl.TextXAlignment = Enum.TextXAlignment.Left
+TargetLbl.TextTruncate = Enum.TextTruncate.AtEnd
+TargetLbl.Parent = TargetBtn
+
+local TargetArrow = Instance.new("TextLabel")
+TargetArrow.Size = UDim2.new(0, 20, 1, 0)
+TargetArrow.AnchorPoint = Vector2.new(1, 0.5)
+TargetArrow.Position = UDim2.new(1, -14, 0.5, 0)
+TargetArrow.BackgroundTransparency = 1
+TargetArrow.Text = "›"
+TargetArrow.TextColor3 = THEME.TextDim
+TargetArrow.Font = Enum.Font.GothamBold
+TargetArrow.TextSize = 18
+TargetArrow.Parent = TargetBtn
+
+TargetBtn.MouseButton1Click:Connect(function()
+    RefreshTargetList()
+    TargetSelectorGui.Visible = true
+end)
+
+Toggles["TargetSelectBtn"] = function()
+    if AimbotTargetPlayer then
+        TargetLbl.Text = "当前目标: " .. AimbotTargetPlayer.Name
+        TargetBtn.BackgroundColor3 = THEME.On
+    else
+        TargetLbl.Text = "选择锁头目标 (当前: 自动)"
+        TargetBtn.BackgroundColor3 = THEME.Card
+    end
+end
+Toggles["TargetSelectBtn"]()
+
+ShowPage("Home")
 
 -- ================= 摇杆读取 =================
 local PlayerModule, Controls
@@ -254,8 +639,43 @@ local function getControls()
     return Controls
 end
 
+-- ================= 手机飞行触控（右侧屏幕辅助区） =================
+-- 右侧非 GUI 触摸: 横拖 = 转向(相机yaw) / 竖拖 = 升降(相对起点, 回中=悬停)
+local flightTouches = {}
+local flyYaw = 0
+local TouchConns = {}
+
+table.insert(TouchConns, UIS.TouchStarted:Connect(function(input, gp)
+    if not IS_TOUCH or not State.Fly or gp then return end
+    if input.Position.X > Camera.ViewportSize.X * 0.45 then
+        flightTouches[input] = {
+            startY = input.Position.Y,
+            curY   = input.Position.Y,
+            lastX  = input.Position.X,
+        }
+    end
+end))
+
+table.insert(TouchConns, UIS.TouchMoved:Connect(function(input)
+    local t = flightTouches[input]
+    if t then
+        flyYaw = flyYaw - (input.Position.X - t.lastX) * 0.005
+        t.curY = input.Position.Y
+        t.lastX = input.Position.X
+    end
+end))
+
+table.insert(TouchConns, UIS.TouchEnded:Connect(function(input)
+    flightTouches[input] = nil
+end))
+table.insert(TouchConns, UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        flightTouches[input] = nil
+    end
+end))
+
 -- ================= 飞行系统 =================
-local Fly = { conn = nil, lv = nil, ao = nil, att = nil, animTracks = {}, currentAnim = "" }
+local Fly = { conn = nil, lv = nil, ao = nil, att = nil, animTracks = {}, currentAnim = "", prevCamType = nil }
 
 local function setFlyAnim(stateName)
     if Fly.currentAnim == stateName then return end
@@ -285,11 +705,16 @@ local function cleanFly()
     if Fly.att then Fly.att:Destroy(); Fly.att = nil end
     for _, track in pairs(Fly.animTracks) do track:Stop(0) end
     Fly.animTracks = {}; Fly.currentAnim = ""
+    if Fly.prevCamType then
+        Camera.CameraType = Fly.prevCamType
+        Fly.prevCamType = nil
+    end
+    table.clear(flightTouches)
     local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
     if hum and not State.Noclip then hum.PlatformStand = false end
 end
 
-local function ToggleFly(on)
+function ToggleFly(on)
     cleanFly()
     if not on then return end
     local char = LP.Character
@@ -301,19 +726,26 @@ local function ToggleFly(on)
     hum.PlatformStand = true
     loadFlyAnims(hum)
 
+    if IS_TOUCH then
+        Fly.prevCamType = Camera.CameraType
+        Camera.CameraType = Enum.CameraType.Scriptable
+        local look = Camera.CFrame.LookVector
+        flyYaw = math.atan2(-look.X, -look.Z)
+    end
+
     Fly.att = Instance.new("Attachment", hrp)
     Fly.lv = Instance.new("LinearVelocity")
     Fly.lv.Attachment0 = Fly.att; Fly.lv.MaxForce = 1e5; Fly.lv.Parent = hrp
     Fly.ao = Instance.new("AlignOrientation")
     Fly.ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
-    Fly.ao.Attachment0 = Fly.att; Fly.ao.MaxTorque = 1e5; Fly.ao.RigidityEnabled = true; Fly.ao.Parent = hrp
+    Fly.ao.Attachment0 = Fly.att; Fly.ao.MaxTorque = 1e5
+    Fly.ao.RigidityEnabled = true; Fly.ao.Parent = hrp
 
     Fly.conn = RunService.RenderStepped:Connect(function()
         local c = LP.Character
         local root = c and c:FindFirstChild("HumanoidRootPart")
         if not root or not Fly.lv or not Fly.ao then return end
 
-        local camCF = workspace.CurrentCamera.CFrame
         local mv = Vector3.zero
         local ctl = getControls()
         if ctl then
@@ -321,44 +753,67 @@ local function ToggleFly(on)
             if ok and typeof(v) == "Vector3" then mv = v end
         end
 
-        local dir = Vector3.zero
-        if mv.Magnitude > 0.05 then
-            dir += camCF.LookVector * (-mv.Z)
-            dir += camCF.RightVector * (mv.X)
-        end
+        local speed = CONFIG.FlySpeeds[CONFIG.FlySpeedIdx]
+        local vel, charYaw
 
-        if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0,1,0) end
-        if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= Vector3.new(0,1,0) end
+        if IS_TOUCH then
+            -- 左摇杆 = 纯水平(相对飞行朝向)；右侧拖动 = 转向 + 升降
+            local yawCF = CFrame.Angles(0, flyYaw, 0)
+            local hDir = yawCF.LookVector * (-mv.Z) + yawCF.RightVector * mv.X
 
-        local currentSpeed = CONFIG.FlySpeeds[CONFIG.FlySpeedIdx]
-        if dir.Magnitude > 1e-4 then
-            Fly.lv.VectorVelocity = dir.Unit * currentSpeed
+            local climb = 0
+            for _, t in pairs(flightTouches) do
+                local ci = math.clamp((t.startY - t.curY) / 140, -1, 1)
+                if math.abs(ci) > math.abs(climb) then climb = ci end
+            end
+
+            local h = Vector3.new(hDir.X, 0, hDir.Z)
+            h = h.Magnitude > 1e-4 and h.Unit or Vector3.zero
+            vel = h * speed + Vector3.new(0, climb * speed * 0.8, 0)
+            charYaw = flyYaw
+
+            -- 飞行相机：跟随角色，右拖已接管转向（锁头时不覆盖）
+            if not State.Aimbot then
+                local look = (yawCF * CFrame.Angles(math.rad(-15), 0, 0)).LookVector
+                local focus = root.Position + Vector3.new(0, 2, 0)
+                Camera.CFrame = CFrame.lookAt(focus - look * CONFIG.FlyCamDist, focus)
+            end
         else
-            Fly.lv.VectorVelocity = Vector3.zero
+            -- PC：保留原逻辑，朝向相机全方向
+            local camCF = Camera.CFrame
+            local dir = camCF.LookVector * (-mv.Z) + camCF.RightVector * mv.X
+            if UIS:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0, 1, 0) end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= Vector3.new(0, 1, 0) end
+            vel = dir.Magnitude > 1e-4 and dir.Unit * speed or Vector3.zero
+
+            local lookFlat = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
+            charYaw = lookFlat.Magnitude > 1e-4
+                and math.atan2(-lookFlat.X, -lookFlat.Z) or 0
         end
 
-        local lookFlat = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z)
-        if lookFlat.Magnitude > 1e-4 then lookFlat = lookFlat.Unit end
-        local yaw = math.atan2(-lookFlat.X, -lookFlat.Z)
-        Fly.ao.CFrame = CFrame.new(Vector3.zero) * CFrame.Angles(0, yaw, 0)
+        Fly.lv.VectorVelocity = vel
+        Fly.ao.CFrame = CFrame.Angles(0, charYaw, 0)
 
+        -- 动画：以竖直分量是否占主导判断升/降
         local inputMag = mv.Magnitude
-        local isVertical = math.abs(dir.Y) > (Vector2.new(dir.X, dir.Z).Magnitude)
-
-        if inputMag < 0.05 and not UIS:IsKeyDown(Enum.KeyCode.Space) and not UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
+        local horiz = Vector2.new(vel.X, vel.Z).Magnitude
+        local vertDom = math.abs(vel.Y) > horiz
+        if inputMag < 0.05 and not vertDom then
             setFlyAnim("Idle")
-        elseif (isVertical and dir.Y > 0) or UIS:IsKeyDown(Enum.KeyCode.Space) then
+        elseif vertDom and vel.Y > 0 then
             setFlyAnim("Jump")
-        elseif (isVertical and dir.Y < 0) or UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
+        elseif vertDom and vel.Y < 0 then
             setFlyAnim("Fall")
+        elseif inputMag > 0.5 then
+            setFlyAnim("Run")
         else
-            if inputMag > 0.5 then setFlyAnim("Run") else setFlyAnim("Walk") end
+            setFlyAnim("Walk")
         end
     end)
 end
 
 -- ================= 锁头 =================
-local function ToggleAimbot(on)
+function ToggleAimbot(on)
     if not on then
         pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
         return
@@ -400,72 +855,71 @@ local function ToggleAimbot(on)
     end)
 end
 
--- ================= ESP 全距离透视 + 连线系统 =================
-local ESPPlayerConn = nil
-local ESPObjects = {} -- 存 Highlight
-local ESPLines = {}   -- 存 UI 线 Frame
-local ESPLabels = {}  -- 存 UI 文字 Label
+-- ================= ESP 全距离透视 + 连线 =================
+local ESPHighlights, ESPLines, ESPLabels = {}, {}, {}
+local ESPConns = {}
+local LinesConn = nil
 
 local function ClearESP()
-    for _, obj in ipairs(ESPObjects) do if obj and obj.Parent then obj:Destroy() end end
-    table.clear(ESPObjects)
-    
-    for _, line in ipairs(ESPLines) do if line and line.Parent then line:Destroy() end end
+    for _, hl in pairs(ESPHighlights) do
+        if hl and hl.Parent then hl:Destroy() end
+    end
+    table.clear(ESPHighlights)
+    for _, line in pairs(ESPLines) do
+        if line and line.Parent then line:Destroy() end
+    end
     table.clear(ESPLines)
-    
-    for _, label in ipairs(ESPLabels) do if label and label.Parent then label:Destroy() end end
+    for _, lbl in pairs(ESPLabels) do
+        if lbl and lbl.Parent then lbl:Destroy() end
+    end
     table.clear(ESPLabels)
-    
-    if ESPPlayerConn then ESPPlayerConn:Disconnect(); ESPPlayerConn = nil end
+    for _, c in ipairs(ESPConns) do c:Disconnect() end
+    table.clear(ESPConns)
+    if LinesConn then LinesConn:Disconnect(); LinesConn = nil end
 end
 
-local LinesConn = nil
 local function StartLinesRenderer()
     if LinesConn then LinesConn:Disconnect(); LinesConn = nil end
-    
+
     LinesConn = RunService.RenderStepped:Connect(function()
         if not State.ESP then return end
-        local vp = Camera.ViewportSize
-        local startPos = Vector2.new(vp.X / 2, 45) -- 灵动岛底部
-        local rainbowColor = Color3.fromHSV((tick() * 0.3) % 1, 1, 1) -- 动态彩虹描边
+        -- 连线起点：灵动岛屏幕中心（AbsolutePosition 已含 UIScale）
+        local startPos = Main.AbsolutePosition + Main.AbsoluteSize / 2
+        local rainbowColor = Color3.fromHSV((tick() * 0.3) % 1, 1, 1)
 
         for player, lineFrame in pairs(ESPLines) do
             if player.Character and LP.Character then
-                local targetPart = player.Character:FindFirstChild("Head") or player.Character:FindFirstChild("HumanoidRootPart")
+                local targetPart = player.Character:FindFirstChild("Head")
+                    or player.Character:FindFirstChild("HumanoidRootPart")
                 local myPos = LP.Character:FindFirstChild("HumanoidRootPart")
-                
+
                 if targetPart and myPos then
                     local screenPos = Camera:WorldToViewportPoint(targetPart.Position)
-                    
-                    -- 距离计算
                     local dist = math.floor((myPos.Position - targetPart.Position).Magnitude)
+                    local isEnemy = not isAlly(player)
+
                     local label = ESPLabels[player]
                     if label then
-                        local isEnemy = not isAlly(player)
                         label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name .. " [" .. dist .. "m]"
-                        label.TextColor3 = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+                        label.TextColor3 = isEnemy and THEME.Red or THEME.Green
                     end
 
-                    -- 实时彩色描边
-                    for _, hl in pairs(ESPObjects) do
-                        if hl.Adornee == player.Character then
-                            hl.OutlineColor = rainbowColor
-                        end
+                    local hl = ESPHighlights[player]
+                    if hl and hl.Parent then
+                        hl.OutlineColor = rainbowColor
                     end
 
-                    -- 连线判断：只要 Z > 0 (人在镜头前方)
                     if screenPos.Z > 0 then
                         local endPos = Vector2.new(screenPos.X, screenPos.Y)
                         local delta = endPos - startPos
-                        local length = delta.Magnitude
-                        local angle = math.deg(math.atan2(delta.Y, delta.X))
-
                         lineFrame.Visible = true
                         lineFrame.Position = UDim2.new(0, startPos.X, 0, startPos.Y)
-                        lineFrame.Size = UDim2.new(0, length, 0, 1)
-                        lineFrame.Rotation = angle
+                        lineFrame.Size = UDim2.new(0, delta.Magnitude, 0, 1)
+                        lineFrame.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                        lineFrame.BackgroundColor3 = isEnemy
+                            and Color3.fromRGB(255, 40, 40) or Color3.fromRGB(40, 255, 60)
                     else
-                        lineFrame.Visible = false -- 人在背后时才隐藏
+                        lineFrame.Visible = false
                     end
                 end
             else
@@ -475,43 +929,48 @@ local function StartLinesRenderer()
     end)
 end
 
-local function AddESP(player)
+function AddESP(player)
     if player == LP then return end
     local char = player.Character
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
 
+    if ESPHighlights[player] and ESPHighlights[player].Parent then
+        ESPHighlights[player]:Destroy()
+    end
     if ESPLines[player] then ESPLines[player]:Destroy() end
     if ESPLabels[player] then ESPLabels[player]:Destroy() end
 
     local isEnemy = not isAlly(player)
-    local mainColor = isEnemy and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+    local mainColor = isEnemy and THEME.Red or THEME.Green
 
-    -- 1. 生成高亮 (内部阵营色，描边动态彩色)
     local highlight = Instance.new("Highlight", char)
-    highlight.Name = "CG_ESP_Highlight"; highlight.Adornee = char
-    highlight.FillColor = mainColor; highlight.FillTransparency = 0.65
+    highlight.Name = "CG_ESP_Highlight"
+    highlight.Adornee = char
+    highlight.FillColor = mainColor
+    highlight.FillTransparency = 0.65
     highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-    table.insert(ESPObjects, highlight)
+    ESPHighlights[player] = highlight
 
-    -- 2. 生成名字与距离 (解除 MaxDistance 限制)
     local billboard = Instance.new("BillboardGui", hrp)
-    billboard.Name = "CG_ESP"; billboard.Adornee = hrp
-    billboard.Size = UDim2.new(0, 200, 0, 40) -- 拉宽一点以免距离显示被截断
+    billboard.Name = "CG_ESP"
+    billboard.Adornee = hrp
+    billboard.Size = UDim2.new(0, 200, 0, 40)
     billboard.StudsOffset = Vector3.new(0, 3, 0)
     billboard.AlwaysOnTop = true
-    billboard.MaxDistance = 100000 -- 解除距离限制
+    billboard.MaxDistance = 100000
 
     local label = Instance.new("TextLabel", billboard)
-    label.Size = UDim2.new(1, 0, 1, 0); label.BackgroundTransparency = 1
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
     label.Text = (isEnemy and "[敌] " or "[友] ") .. player.Name
-    label.TextColor3 = mainColor; label.TextStrokeTransparency = 0
-    label.Font = Enum.Font.GothamBold; label.TextSize = 14
-    label.Parent = billboard
-    table.insert(ESPLabels, label)
+    label.TextColor3 = mainColor
+    label.TextStrokeTransparency = 0
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 14
+    ESPLabels[player] = label -- 按 Player 键存，渲染端才能取到
 
-    -- 3. 生成连线（白线）
     local line = Instance.new("Frame")
     line.Name = "CG_ESP_Line"
     line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
@@ -523,28 +982,47 @@ local function AddESP(player)
     ESPLines[player] = line
 end
 
-local function RefreshESP()
+function RefreshESP()
     ClearESP()
     if not State.ESP then return end
     for _, p in ipairs(Players:GetPlayers()) do AddESP(p) end
     StartLinesRenderer()
 end
 
-local function ToggleESP(on)
+function ToggleESP(on)
     ClearESP()
     if not on then return end
     RefreshESP()
 
-    ESPPlayerConn = Players.PlayerAdded:Connect(function(p)
-        p.CharacterAdded:Connect(function() task.wait(0.5); if State.ESP then AddESP(p) end end)
-    end)
+    -- 所有连接统一入表，ClearESP 时全断（修复泄漏）
+    table.insert(ESPConns, Players.PlayerAdded:Connect(function(p)
+        table.insert(ESPConns, p.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            if State.ESP then AddESP(p) end
+        end))
+        task.spawn(function()
+            if not p.Character then p.CharacterAdded:Wait() end
+            task.wait(0.5)
+            if State.ESP then AddESP(p) end
+        end)
+    end))
     for _, p in ipairs(Players:GetPlayers()) do
-        p.CharacterAdded:Connect(function() task.wait(0.5); if State.ESP then AddESP(p) end end)
+        table.insert(ESPConns, p.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            if State.ESP then AddESP(p) end
+        end))
     end
 end
 
+-- 玩家退出时清理其 ESP 线/标签
+Players.PlayerRemoving:Connect(function(p)
+    if ESPLines[p] then ESPLines[p]:Destroy(); ESPLines[p] = nil end
+    if ESPLabels[p] then ESPLabels[p]:Destroy(); ESPLabels[p] = nil end
+    ESPHighlights[p] = nil
+end)
+
 -- ================= 目标选择器 UI =================
-local TargetSelectorGui = Instance.new("Frame")
+TargetSelectorGui = Instance.new("Frame")
 TargetSelectorGui.Name = "TargetSelector"
 TargetSelectorGui.Size = UDim2.new(0, 280, 0, 380)
 TargetSelectorGui.Position = UDim2.new(0.5, 0, 0.5, 0)
@@ -557,6 +1035,10 @@ TargetSelectorGui.ZIndex = 10
 TargetSelectorGui.Parent = ScreenGui
 corner(TargetSelectorGui, 10)
 stroke(TargetSelectorGui, Color3.fromRGB(100, 100, 120), 2)
+
+TSScale = Instance.new("UIScale")
+TSScale.Parent = TargetSelectorGui
+updateScale()
 
 local TS_Title = Instance.new("TextLabel")
 TS_Title.Size = UDim2.new(1, 0, 0, 40)
@@ -573,7 +1055,7 @@ TS_Close.Size = UDim2.new(0, 30, 0, 30)
 TS_Close.Position = UDim2.new(1, -35, 0, 5)
 TS_Close.BackgroundColor3 = Color3.fromRGB(190, 55, 55)
 TS_Close.BorderSizePixel = 0
-TS_Close.Text = "X"
+TS_Close.Text = "✕"
 TS_Close.TextColor3 = Color3.fromRGB(255, 255, 255)
 TS_Close.Font = Enum.Font.GothamBold
 TS_Close.TextSize = 14
@@ -588,6 +1070,8 @@ TS_Scroll.Position = UDim2.new(0, 10, 0, 40)
 TS_Scroll.BackgroundTransparency = 1
 TS_Scroll.BorderSizePixel = 0
 TS_Scroll.ScrollBarThickness = 4
+TS_Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+TS_Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 TS_Scroll.ZIndex = 11
 TS_Scroll.Parent = TargetSelectorGui
 
@@ -596,7 +1080,7 @@ TS_Layout.Padding = UDim.new(0, 6)
 TS_Layout.SortOrder = Enum.SortOrder.LayoutOrder
 TS_Layout.Parent = TS_Scroll
 
-local function RefreshTargetList()
+function RefreshTargetList()
     for _, child in ipairs(TS_Scroll:GetChildren()) do
         if child:IsA("Frame") or child:IsA("TextButton") then child:Destroy() end
     end
@@ -629,7 +1113,8 @@ local function RefreshTargetList()
             local btnLock = Instance.new("TextButton")
             btnLock.Size = UDim2.new(0.65, 0, 1, 0)
             btnLock.BackgroundTransparency = 1
-            btnLock.Text = (p.Name == (AimbotTargetPlayer and AimbotTargetPlayer.Name)) and ("[锁定] " .. p.Name) or p.Name
+            btnLock.Text = (AimbotTargetPlayer and p.Name == AimbotTargetPlayer.Name)
+                and ("[锁定] " .. p.Name) or p.Name
             btnLock.TextColor3 = isAlly(p) and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
             btnLock.Font = Enum.Font.GothamSemibold
             btnLock.TextSize = 14
@@ -647,7 +1132,8 @@ local function RefreshTargetList()
             local btnAlly = Instance.new("TextButton")
             btnAlly.Size = UDim2.new(0.35, 0, 1, 0)
             btnAlly.Position = UDim2.new(0.65, 0, 0, 0)
-            btnAlly.BackgroundColor3 = ManualAllies[p.Name] and Color3.fromRGB(55, 140, 90) or Color3.fromRGB(80, 80, 90)
+            btnAlly.BackgroundColor3 = ManualAllies[p.Name]
+                and Color3.fromRGB(55, 140, 90) or Color3.fromRGB(80, 80, 90)
             btnAlly.Text = ManualAllies[p.Name] and "取消友军" or "设为友军"
             btnAlly.TextColor3 = Color3.fromRGB(255, 255, 255)
             btnAlly.Font = Enum.Font.GothamBold
@@ -655,9 +1141,13 @@ local function RefreshTargetList()
             btnAlly.ZIndex = 12
             btnAlly.Parent = row
             corner(btnAlly, 6)
-            
+
             btnAlly.MouseButton1Click:Connect(function()
-                if ManualAllies[p.Name] then ManualAllies[p.Name] = nil else ManualAllies[p.Name] = true end
+                if ManualAllies[p.Name] then
+                    ManualAllies[p.Name] = nil
+                else
+                    ManualAllies[p.Name] = true
+                end
                 RefreshTargetList()
                 RefreshESP()
             end)
@@ -667,7 +1157,7 @@ end
 
 -- ================= 穿墙 =================
 local NoclipConn = nil
-local function ToggleNoclip(on)
+function ToggleNoclip(on)
     if NoclipConn then NoclipConn:Disconnect(); NoclipConn = nil end
     if not on then
         local char = LP.Character
@@ -692,7 +1182,7 @@ end
 -- ================= 移速 =================
 local SpeedConn = nil
 local origSpeed
-local function ToggleSpeed(on)
+function ToggleSpeed(on)
     if SpeedConn then SpeedConn:Disconnect(); SpeedConn = nil end
     local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
     if not hum then return end
@@ -718,74 +1208,17 @@ end
 
 -- ================= 跳跃 =================
 local origJump
-local function ToggleJump(on)
+function ToggleJump(on)
     local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
     if not hum then return end
-    if on then 
+    if on then
         origJump = hum.JumpPower
         hum.UseJumpPower = true
         hum.JumpPower = CONFIG.JumpPowers[CONFIG.JumpPowerIdx]
-    else 
-        if origJump then hum.JumpPower = origJump end 
-    end
-end
-
--- ================= 绑定按钮 =================
-CreateToggle("飞天 (Fly)", "Fly", function(on) ToggleFly(on) end)
-CreateCycleBtn("飞行速度", {"慢", "中", "快", "超快"}, CONFIG.FlySpeedIdx, function(idx)
-    CONFIG.FlySpeedIdx = idx
-end)
-
-CreateToggle("透视 (ESP)", "ESP", ToggleESP)
-CreateCycleBtn("透视阵营", {"仅队伍", "全敌", "全友"}, 1, function(idx)
-    ESPMode = idx
-    RefreshESP()
-end)
-
-CreateToggle("穿墙 (Noclip)", "Noclip", ToggleNoclip)
-
-CreateToggle("加强跳跃 (Jump)", "JumpPower", ToggleJump)
-CreateCycleBtn("跳跃力度", {"正常", "加强", "超高", "飞天"}, CONFIG.JumpPowerIdx, function(idx)
-    CONFIG.JumpPowerIdx = idx
-    if State.JumpPower then
-        local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum.JumpPower = CONFIG.JumpPowers[idx] end
-    end
-end)
-
-CreateToggle("加强移速 (Speed)", "Speed", ToggleSpeed)
-CreateCycleBtn("移动速度", {"快跑", "疾跑", "瞬移", "光速"}, CONFIG.WalkSpeedIdx, function(idx)
-    CONFIG.WalkSpeedIdx = idx
-end)
-
-CreateToggle("锁头 (Aimbot)", "Aimbot", ToggleAimbot)
-
-local TargetBtn = Instance.new("TextButton")
-TargetBtn.Size = UDim2.new(1, 0, 0, BTN_H)
-TargetBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
-TargetBtn.BorderSizePixel = 0
-TargetBtn.TextColor3 = Color3.fromRGB(235,235,235)
-TargetBtn.Font = Enum.Font.GothamSemibold
-TargetBtn.TextSize = IS_MOBILE and 17 or 15
-TargetBtn.Parent = List
-corner(TargetBtn, 8)
-stroke(TargetBtn, Color3.fromRGB(80,80,100), 1)
-
-TargetBtn.MouseButton1Click:Connect(function()
-    RefreshTargetList()
-    TargetSelectorGui.Visible = true
-end)
-
-Toggles["TargetSelectBtn"] = function()
-    if AimbotTargetPlayer then
-        TargetBtn.Text = "当前目标: " .. AimbotTargetPlayer.Name
-        TargetBtn.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
     else
-        TargetBtn.Text = "选择锁头目标 (当前: 自动)"
-        TargetBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+        if origJump then hum.JumpPower = origJump end
     end
 end
-Toggles["TargetSelectBtn"]()
 
 -- ================= 重生与清理 =================
 LP.CharacterAdded:Connect(function()
@@ -799,12 +1232,13 @@ end)
 
 CloseBtn.MouseButton1Click:Connect(function()
     cleanFly()
-    if NoclipConn then NoclipConn:Disconnect(); end
-    if SpeedConn then SpeedConn:Disconnect(); end
-    if LinesConn then LinesConn:Disconnect(); end
+    if NoclipConn then NoclipConn:Disconnect() end
+    if SpeedConn then SpeedConn:Disconnect() end
+    if LinesConn then LinesConn:Disconnect() end
+    for _, c in ipairs(TouchConns) do c:Disconnect() end
     pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
     ClearESP()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] 已更新！全距离透视与彩虹描边已开启。")
+print("[概念神菜单] v1.2 已加载：飞行 = 左摇杆平移 + 右屏拖动(横转/竖升降)")
