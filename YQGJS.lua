@@ -1,11 +1,10 @@
 --[[
-    概念神菜单 (Concept God Menu) v1.3 - 多级菜单版
+    概念神菜单 (Concept God Menu) v1.4 - 多级菜单版
     文件名: YQGJS.lua
     本版更新:
-      新增: 辅助功能页 / 弹飞玩家(触碰即弹飞+击杀, 三档力度: 普通/强力/离谱)
-      飞行: 左摇杆=平移, 右侧屏幕拖动=横转/竖升降(回中即悬停), PC端 WASD+Space/Shift
-      修复: 前向声明缺失 / ESP标签键值错误 / UICorner tween 报错 / ESP连接泄漏
-      UI:   深色卡片风 / iOS开关 / 页面切换动画 / 按压反馈 / 呼吸状态灯
+      新增: 环境功能页 / 强制白天(锁定正午光照, 自动对抗昼夜循环, 关闭还原)
+      已有: 辅助页弹飞玩家 / 手机飞行(左摇杆平移+右屏拖动转向升降) / 锁头/ESP/穿墙/移速/跳跃
+      修复: 前向声明 / ESP标签键值 / UICorner tween / ESP连接泄漏
 ]]
 
 -- ================= 全局配置 =================
@@ -29,6 +28,9 @@ local CONFIG = {
     FlingVelIdx  = 1,
 
     FlyCamDist   = 15,
+
+    DayClockTime = 14,   -- 强制白天锁定的时间(小时, 14=下午2点正午光)
+    DayBrightness = 3,
 }
 
 local THEME = {
@@ -57,6 +59,7 @@ local RunService   = game:GetService("RunService")
 local UIS          = game:GetService("UserInputService")
 local CoreGui      = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
+local Lighting     = game:GetService("Lighting")
 
 local LP     = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
@@ -67,7 +70,8 @@ local IS_MOBILE = IS_TOUCH
 -- ================= 状态 =================
 local State = {
     Fly = false, ESP = false, Noclip = false,
-    JumpPower = false, Speed = false, Aimbot = false, Fling = false,
+    JumpPower = false, Speed = false, Aimbot = false,
+    Fling = false, Daytime = false,
 }
 local ESPMode            = 1
 local AimbotTargetPlayer = nil
@@ -75,7 +79,8 @@ local ManualAllies       = {}
 
 -- 前向声明（UI 先引用、后段赋值，闭包调用时取值）
 local ToggleFly, ToggleESP, RefreshESP, ToggleNoclip
-local ToggleSpeed, ToggleJump, ToggleAimbot, ToggleFling, RefreshTargetList
+local ToggleSpeed, ToggleJump, ToggleAimbot, ToggleFling, ToggleDaytime
+local RefreshTargetList
 local TargetSelectorGui, TSScale
 
 -- ================= 敌友识别 =================
@@ -234,7 +239,7 @@ local Footer = Instance.new("TextLabel")
 Footer.Size = UDim2.new(1, -16, 0, 18)
 Footer.Position = UDim2.new(0, 8, 1, -24)
 Footer.BackgroundTransparency = 1
-Footer.Text = "Concept God Menu · v1.3"
+Footer.Text = "Concept God Menu · v1.4"
 Footer.TextColor3 = THEME.TextDim
 Footer.Font = Enum.Font.Gotham
 Footer.TextSize = 11
@@ -301,6 +306,7 @@ local EspPage    = CreatePage("Esp")
 local MovePage   = CreatePage("Move")
 local CombatPage = CreatePage("Combat")
 local AssistPage = CreatePage("Assist")
+local EnvPage    = CreatePage("Env")
 
 -- ================= 按钮组件 =================
 local BTN_H = IS_MOBILE and 52 or 44
@@ -528,6 +534,7 @@ CreateNavBtn(HomePage, "◎", "透视设置", "Esp")
 CreateNavBtn(HomePage, "⇄", "移动 · 穿墙/移速/跳跃", "Move")
 CreateNavBtn(HomePage, "✜", "战斗 · 锁头", "Combat")
 CreateNavBtn(HomePage, "⚡", "辅助 · 弹飞玩家", "Assist")
+CreateNavBtn(HomePage, "☀", "环境 · 强制白天", "Env")
 
 -- 飞行页
 CreatePageHeader(FlyPage, "飞行设置")
@@ -625,7 +632,7 @@ Toggles["TargetSelectBtn"] = function()
 end
 Toggles["TargetSelectBtn"]()
 
--- 【新增】辅助功能页
+-- 辅助页
 CreatePageHeader(AssistPage, "辅助功能")
 CreateToggle(AssistPage, "弹飞玩家 (触碰)", "Fling", function(on) ToggleFling(on) end)
 CreateCycleBtn(AssistPage, "弹飞力度", {"普通", "强力", "离谱"},
@@ -640,6 +647,20 @@ flingHint.TextSize = 12
 flingHint.TextWrapped = true
 flingHint.Text = "开启后，你贴到的敌人会被弹飞并死亡。\n手动标友与同队玩家不受影响；透视阵营设为「全敌」时可弹所有人。"
 flingHint.Parent = AssistPage
+
+-- 【新增】环境页
+CreatePageHeader(EnvPage, "环境设置")
+CreateToggle(EnvPage, "强制白天", "Daytime", function(on) ToggleDaytime(on) end)
+
+local envHint = Instance.new("TextLabel")
+envHint.Size = UDim2.new(1, 0, 0, 46)
+envHint.BackgroundTransparency = 1
+envHint.TextColor3 = THEME.TextDim
+envHint.Font = Enum.Font.Gotham
+envHint.TextSize = 12
+envHint.TextWrapped = true
+envHint.Text = "开启后锁定为正午光照，游戏的昼夜循环会被立即拉回白天。\n效果仅自己可见；关闭后自动恢复游戏原本的时间与光照。"
+envHint.Parent = EnvPage
 
 ShowPage("Home")
 
@@ -1232,11 +1253,10 @@ function ToggleJump(on)
     end
 end
 
--- ================= 【新增】辅助功能：触碰弹飞 =================
+-- ================= 辅助功能：触碰弹飞 =================
 local FlingConns = {}
 local flingCooldown = {}
 
--- 从被碰的部件反查玩家（兼容身体部件和配饰 Handle）
 local function playerFromHit(hit)
     if not hit or not hit.Parent then return nil end
     local p = Players:GetPlayerFromCharacter(hit.Parent)
@@ -1257,9 +1277,8 @@ local function onFlingTouch(hit)
 
     local player, char = playerFromHit(hit)
     if not player or player == LP then return end
-    if isAlly(player) then return end -- 想连友军一起弹就删掉这行
+    if isAlly(player) then return end
 
-    -- 每人 1.2 秒冷却，防止同一次贴身触发几十次
     local now = os.clock()
     if flingCooldown[player] and now - flingCooldown[player] < 1.2 then return end
     flingCooldown[player] = now
@@ -1272,7 +1291,6 @@ local function onFlingTouch(hit)
 
     local power = CONFIG.FlingVel[CONFIG.FlingVelIdx] or 300
 
-    -- 弹飞方向：从我指向对方（水平），带向上分量；角速度让它旋转飞出
     local dir = root.Position - myRoot.Position
     dir = Vector3.new(dir.X, 0, dir.Z)
     dir = dir.Magnitude > 0.05 and dir.Unit or myRoot.CFrame.LookVector
@@ -1281,7 +1299,6 @@ local function onFlingTouch(hit)
     root.AssemblyAngularVelocity = Vector3.new(power, power, power)
     pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
 
-    -- 护盾保护的角色只弹不杀
     if not char:FindFirstChildOfClass("ForceField") then
         hum.Health = 0
     end
@@ -1300,11 +1317,73 @@ function ToggleFling(on)
     if not on then return end
 
     if LP.Character then hookFling(LP.Character) end
-    -- 重生后自动重新挂钩
     table.insert(FlingConns, LP.CharacterAdded:Connect(function(c)
         task.wait(0.6)
         if State.Fling then hookFling(c) end
     end))
+end
+
+-- ================= 【新增】环境功能：强制白天 =================
+local DayConns = {}
+local dayLoopRunning = false
+local origLighting = nil
+
+local function saveLighting()
+    if origLighting then return end
+    origLighting = {
+        ClockTime      = Lighting.ClockTime,
+        Brightness     = Lighting.Brightness,
+        Ambient        = Lighting.Ambient,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+        GlobalShadows  = Lighting.GlobalShadows,
+    }
+end
+
+local function restoreLighting()
+    if not origLighting then return end
+    for k, v in pairs(origLighting) do
+        pcall(function() Lighting[k] = v end)
+    end
+    origLighting = nil
+end
+
+local function forceDay()
+    Lighting.ClockTime = CONFIG.DayClockTime
+    Lighting.Brightness = CONFIG.DayBrightness
+    Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+    Lighting.GlobalShadows = true
+end
+
+function ToggleDaytime(on)
+    dayLoopRunning = false
+    for _, c in ipairs(DayConns) do c:Disconnect() end
+    table.clear(DayConns)
+
+    if not on then
+        restoreLighting()
+        return
+    end
+
+    saveLighting()
+    forceDay()
+
+    -- 反制昼夜循环：游戏一改时间立刻拉回白天
+    table.insert(DayConns, Lighting:GetPropertyChangedSignal("ClockTime"):Connect(function()
+        if State.Daytime and Lighting.ClockTime ~= CONFIG.DayClockTime then
+            Lighting.ClockTime = CONFIG.DayClockTime
+        end
+    end))
+
+    -- 兜底轮询：防止部分游戏用别的方式持续改光照
+    dayLoopRunning = true
+    task.spawn(function()
+        while dayLoopRunning and ScreenGui.Parent do
+            task.wait(1)
+            if State.Daytime then
+                forceDay()
+            end
+        end
+    end)
 end
 
 -- ================= 重生与清理 =================
@@ -1324,9 +1403,16 @@ CloseBtn.MouseButton1Click:Connect(function()
     if LinesConn then LinesConn:Disconnect() end
     for _, c in ipairs(TouchConns) do c:Disconnect() end
     for _, c in ipairs(FlingConns) do c:Disconnect() end
+
+    -- 环境还原
+    dayLoopRunning = false
+    for _, c in ipairs(DayConns) do c:Disconnect() end
+    table.clear(DayConns)
+    restoreLighting()
+
     pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
     ClearESP()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] v1.3 已加载：辅助功能 → 弹飞玩家")
+print("[概念神菜单] v1.4 已加载：环境 → 强制白天")
