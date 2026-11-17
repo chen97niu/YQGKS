@@ -1,9 +1,9 @@
 --[[
-    概念神菜单 (Concept God Menu) v1.4 - 多级菜单版
+    概念神菜单 (Concept God Menu) v1.5 - 多级菜单版
     文件名: YQGJS.lua
     本版更新:
-      新增: 环境功能页 / 强制白天(锁定正午光照, 自动对抗昼夜循环, 关闭还原)
-      已有: 辅助页弹飞玩家 / 手机飞行(左摇杆平移+右屏拖动转向升降) / 锁头/ESP/穿墙/移速/跳跃
+      新增: 背包功能页(玩家列表→查看物品→拿取/一键拿取, 自动刷新, 目标退出保护)
+      已有: 环境页强制白天 / 辅助页弹飞 / 手机飞行(左摇杆+右屏转向升降) / 锁头/ESP/穿墙/移速/跳跃
       修复: 前向声明 / ESP标签键值 / UICorner tween / ESP连接泄漏
 ]]
 
@@ -20,7 +20,7 @@ local CONFIG = {
     FlySpeeds    = {40, 80, 120, 200},
     JumpPowers   = {80, 120, 200, 300},
     WalkSpeeds   = {40, 80, 150, 250},
-    FlingVel     = {250, 500, 1000},   -- 弹飞力度: 普通/强力/离谱
+    FlingVel     = {250, 500, 1000},
 
     FlySpeedIdx  = 1,
     JumpPowerIdx = 1,
@@ -29,7 +29,7 @@ local CONFIG = {
 
     FlyCamDist   = 15,
 
-    DayClockTime = 14,   -- 强制白天锁定的时间(小时, 14=下午2点正午光)
+    DayClockTime  = 14,
     DayBrightness = 3,
 }
 
@@ -76,6 +76,7 @@ local State = {
 local ESPMode            = 1
 local AimbotTargetPlayer = nil
 local ManualAllies       = {}
+local selectedBpPlayer   = nil   -- 背包页当前选中的玩家
 
 -- 前向声明（UI 先引用、后段赋值，闭包调用时取值）
 local ToggleFly, ToggleESP, RefreshESP, ToggleNoclip
@@ -239,7 +240,7 @@ local Footer = Instance.new("TextLabel")
 Footer.Size = UDim2.new(1, -16, 0, 18)
 Footer.Position = UDim2.new(0, 8, 1, -24)
 Footer.BackgroundTransparency = 1
-Footer.Text = "Concept God Menu · v1.4"
+Footer.Text = "Concept God Menu · v1.5"
 Footer.TextColor3 = THEME.TextDim
 Footer.Font = Enum.Font.Gotham
 Footer.TextSize = 11
@@ -307,6 +308,8 @@ local MovePage   = CreatePage("Move")
 local CombatPage = CreatePage("Combat")
 local AssistPage = CreatePage("Assist")
 local EnvPage    = CreatePage("Env")
+local BpPage     = CreatePage("Bp")       -- 背包：玩家列表
+local BpItemPage = CreatePage("BpItems")  -- 背包：物品列表
 
 -- ================= 按钮组件 =================
 local BTN_H = IS_MOBILE and 52 or 44
@@ -361,7 +364,8 @@ local function CreateNavBtn(parent, icon, text, targetPage)
     return Btn
 end
 
-local function CreatePageHeader(parent, title)
+-- backPage: 返回按钮去哪页（默认回主页）
+local function CreatePageHeader(parent, title, backPage)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, 0, 0, 34)
     row.BackgroundTransparency = 1
@@ -378,7 +382,7 @@ local function CreatePageHeader(parent, title)
     local pad = Instance.new("UIPadding", back)
     pad.PaddingLeft = UDim.new(0, 2)
     back.Parent = row
-    back.MouseButton1Click:Connect(function() ShowPage("Home") end)
+    back.MouseButton1Click:Connect(function() ShowPage(backPage or "Home") end)
 
     local ttl = Instance.new("TextLabel")
     ttl.Size = UDim2.new(1, -100, 1, 0)
@@ -535,6 +539,7 @@ CreateNavBtn(HomePage, "⇄", "移动 · 穿墙/移速/跳跃", "Move")
 CreateNavBtn(HomePage, "✜", "战斗 · 锁头", "Combat")
 CreateNavBtn(HomePage, "⚡", "辅助 · 弹飞玩家", "Assist")
 CreateNavBtn(HomePage, "☀", "环境 · 强制白天", "Env")
+local BackpackNavBtn = CreateNavBtn(HomePage, "▣", "背包 · 查看/拿取", "Bp")
 
 -- 飞行页
 CreatePageHeader(FlyPage, "飞行设置")
@@ -648,7 +653,7 @@ flingHint.TextWrapped = true
 flingHint.Text = "开启后，你贴到的敌人会被弹飞并死亡。\n手动标友与同队玩家不受影响；透视阵营设为「全敌」时可弹所有人。"
 flingHint.Parent = AssistPage
 
--- 【新增】环境页
+-- 环境页
 CreatePageHeader(EnvPage, "环境设置")
 CreateToggle(EnvPage, "强制白天", "Daytime", function(on) ToggleDaytime(on) end)
 
@@ -1049,6 +1054,7 @@ function ToggleESP(on)
 end
 
 Players.PlayerRemoving:Connect(function(p)
+    if selectedBpPlayer == p then selectedBpPlayer = nil end
     if ESPLines[p] then ESPLines[p]:Destroy(); ESPLines[p] = nil end
     if ESPLabels[p] then ESPLabels[p]:Destroy(); ESPLabels[p] = nil end
     ESPHighlights[p] = nil
@@ -1323,7 +1329,7 @@ function ToggleFling(on)
     end))
 end
 
--- ================= 【新增】环境功能：强制白天 =================
+-- ================= 环境功能：强制白天 =================
 local DayConns = {}
 local dayLoopRunning = false
 local origLighting = nil
@@ -1367,14 +1373,12 @@ function ToggleDaytime(on)
     saveLighting()
     forceDay()
 
-    -- 反制昼夜循环：游戏一改时间立刻拉回白天
     table.insert(DayConns, Lighting:GetPropertyChangedSignal("ClockTime"):Connect(function()
         if State.Daytime and Lighting.ClockTime ~= CONFIG.DayClockTime then
             Lighting.ClockTime = CONFIG.DayClockTime
         end
     end))
 
-    -- 兜底轮询：防止部分游戏用别的方式持续改光照
     dayLoopRunning = true
     task.spawn(function()
         while dayLoopRunning and ScreenGui.Parent do
@@ -1385,6 +1389,357 @@ function ToggleDaytime(on)
         end
     end)
 end
+
+-- ================= 【新增】背包功能：查看 / 拿取 =================
+local BpItemConns = {}
+
+local function clearBpItemConns()
+    for _, c in ipairs(BpItemConns) do c:Disconnect() end
+    table.clear(BpItemConns)
+end
+
+-- 拿取 = 把对方工具克隆一份塞进自己背包（客户端操作）
+local function takeTool(tool)
+    if not tool or not tool.Parent then return false, "物品已消失" end
+    local bp = LP:FindFirstChild("Backpack")
+    if not bp then return false, "找不到背包" end
+    pcall(function() tool.Archivable = true end)
+    local ok = pcall(function()
+        local copy = tool:Clone()
+        copy.Parent = bp
+    end)
+    if ok then return true end
+    return false, "克隆失败"
+end
+
+-- ---- 背包页 UI（玩家列表） ----
+CreatePageHeader(BpPage, "背包查看")
+
+local BpRefresh = Instance.new("TextButton")
+BpRefresh.Size = UDim2.new(1, 0, 0, 38)
+BpRefresh.LayoutOrder = 2
+BpRefresh.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+BpRefresh.BackgroundTransparency = 0.25
+BpRefresh.BorderSizePixel = 0
+BpRefresh.Text = "↻ 刷新玩家列表"
+BpRefresh.TextColor3 = THEME.Text
+BpRefresh.Font = Enum.Font.GothamSemibold
+BpRefresh.TextSize = 14
+BpRefresh.AutoButtonColor = false
+BpRefresh.Parent = BpPage
+corner(BpRefresh, 8)
+attachPress(BpRefresh, Color3.fromRGB(60, 60, 75), Color3.fromRGB(44, 44, 55))
+
+local bpHint = Instance.new("TextLabel")
+bpHint.Size = UDim2.new(1, 0, 0, 58)
+bpHint.LayoutOrder = 100
+bpHint.BackgroundTransparency = 1
+bpHint.TextColor3 = THEME.TextDim
+bpHint.Font = Enum.Font.Gotham
+bpHint.TextSize = 12
+bpHint.TextWrapped = true
+bpHint.Text = "点击玩家名字查看他的物品。能否看到对方背包由游戏决定——\n看不到背包时，至少能拿他手里装备中的工具。"
+bpHint.Parent = BpPage
+
+local function buildBpPlayerList()
+    for _, c in ipairs(BpPage:GetChildren()) do
+        if (c:IsA("TextButton") or c:IsA("Frame")) and c.LayoutOrder >= 10 and c.LayoutOrder < 100 then
+            c:Destroy()
+        end
+    end
+
+    local order = 10
+    local added = false
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            added = true
+            local bpCount, equipped = 0, 0
+            local bpReadable = (p:FindFirstChild("Backpack") ~= nil)
+            if bpReadable then
+                for _, t in ipairs(p.Backpack:GetChildren()) do
+                    if t:IsA("Tool") then bpCount += 1 end
+                end
+            end
+            if p.Character then
+                for _, t in ipairs(p.Character:GetChildren()) do
+                    if t:IsA("Tool") then equipped += 1 end
+                end
+            end
+
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, 0, 0, BTN_H)
+            row.LayoutOrder = order; order += 1
+            row.BackgroundColor3 = THEME.Card
+            row.BorderSizePixel = 0
+            row.Text = ""
+            row.AutoButtonColor = false
+            row.Parent = BpPage
+            corner(row, 10)
+            stroke(row, THEME.Stroke, 1, 0.6)
+            attachPress(row, THEME.Card, THEME.CardPress)
+
+            local nm = Instance.new("TextLabel")
+            nm.Size = UDim2.new(1, -190, 1, 0)
+            nm.Position = UDim2.new(0, 14, 0, 0)
+            nm.BackgroundTransparency = 1
+            nm.Text = p.DisplayName .. " (@" .. p.Name .. ")"
+            nm.TextColor3 = THEME.Text
+            nm.Font = Enum.Font.GothamSemibold
+            nm.TextSize = IS_MOBILE and 15 or 14
+            nm.TextXAlignment = Enum.TextXAlignment.Left
+            nm.TextTruncate = Enum.TextTruncate.AtEnd
+            nm.Parent = row
+
+            local cnt = Instance.new("TextLabel")
+            cnt.Size = UDim2.new(0, 170, 1, 0)
+            cnt.AnchorPoint = Vector2.new(1, 0.5)
+            cnt.Position = UDim2.new(1, -14, 0.5, 0)
+            cnt.BackgroundTransparency = 1
+            cnt.Text = bpReadable
+                and ("背包 " .. bpCount .. " · 装备 " .. equipped)
+                or ("装备 " .. equipped .. " · 背包未同步")
+            cnt.TextColor3 = THEME.TextDim
+            cnt.Font = Enum.Font.Gotham
+            cnt.TextSize = 12
+            cnt.TextXAlignment = Enum.TextXAlignment.Right
+            cnt.Parent = row
+
+            row.MouseButton1Click:Connect(function()
+                if not p.Parent then buildBpPlayerList() return end
+                selectedBpPlayer = p
+                buildBpItemList(p)
+                ShowPage("BpItems")
+            end)
+        end
+    end
+
+    if not added then
+        local empty = Instance.new("Frame")
+        empty.Size = UDim2.new(1, 0, 0, 44)
+        empty.LayoutOrder = 11
+        empty.BackgroundColor3 = THEME.Card
+        empty.BackgroundTransparency = 0.5
+        empty.BorderSizePixel = 0
+        empty.Parent = BpPage
+        corner(empty, 8)
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.new(1, 0, 1, 0)
+        t.BackgroundTransparency = 1
+        t.Text = "服务器里没有其他玩家"
+        t.TextColor3 = THEME.TextDim
+        t.Font = Enum.Font.Gotham
+        t.TextSize = 13
+        t.Parent = empty
+    end
+end
+
+-- ---- 物品页 UI ----
+CreatePageHeader(BpItemPage, "物品列表", "Bp")
+
+local BpOwnerLabel = Instance.new("TextLabel")
+BpOwnerLabel.Size = UDim2.new(1, 0, 0, 20)
+BpOwnerLabel.LayoutOrder = 2
+BpOwnerLabel.BackgroundTransparency = 1
+BpOwnerLabel.Text = "目标: -"
+BpOwnerLabel.TextColor3 = THEME.TextDim
+BpOwnerLabel.Font = Enum.Font.GothamBold
+BpOwnerLabel.TextSize = 13
+BpOwnerLabel.TextXAlignment = Enum.TextXAlignment.Left
+BpOwnerLabel.TextTruncate = Enum.TextTruncate.AtEnd
+BpOwnerLabel.Parent = BpItemPage
+
+local BpTakeAll = Instance.new("TextButton")
+BpTakeAll.Size = UDim2.new(1, 0, 0, 40)
+BpTakeAll.LayoutOrder = 3
+BpTakeAll.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
+BpTakeAll.BackgroundTransparency = 0.2
+BpTakeAll.BorderSizePixel = 0
+BpTakeAll.Text = "⇓ 一键拿取全部"
+BpTakeAll.TextColor3 = Color3.fromRGB(255, 255, 255)
+BpTakeAll.Font = Enum.Font.GothamBold
+BpTakeAll.TextSize = 15
+BpTakeAll.AutoButtonColor = false
+BpTakeAll.Parent = BpItemPage
+corner(BpTakeAll, 8)
+attachPress(BpTakeAll, Color3.fromRGB(55, 140, 90), Color3.fromRGB(70, 170, 110))
+
+local bpItemHint = Instance.new("TextLabel")
+bpItemHint.Size = UDim2.new(1, 0, 0, 58)
+bpItemHint.LayoutOrder = 100
+bpItemHint.BackgroundTransparency = 1
+bpItemHint.TextColor3 = THEME.TextDim
+bpItemHint.Font = Enum.Font.Gotham
+bpItemHint.TextSize = 12
+bpItemHint.TextWrapped = true
+bpItemHint.Text = "点「拿取」会把该工具复制进你的背包（一键拿取=全部复制）。\n这是本地操作：校验松的游戏里能真正使用；校验严的游戏只有你自己看得见。"
+bpItemHint.Parent = BpItemPage
+
+function buildBpItemList(pl)
+    clearBpItemConns()
+    for _, c in ipairs(BpItemPage:GetChildren()) do
+        if (c:IsA("TextButton") or c:IsA("Frame")) and c.LayoutOrder >= 10 and c.LayoutOrder < 100 then
+            c:Destroy()
+        end
+    end
+
+    if not pl or not pl.Parent then
+        BpOwnerLabel.Text = "目标已离开服务器"
+        return
+    end
+    BpOwnerLabel.Text = "目标: " .. pl.DisplayName .. " (@" .. pl.Name .. ")"
+
+    -- 收集可见工具：装备中(永远可见) + 背包(游戏同步了才能看见)
+    local items = {}
+    local char = pl.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") then table.insert(items, {tool = t, where = "装备中"}) end
+        end
+    end
+    local bp = pl:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then table.insert(items, {tool = t, where = "背包"}) end
+        end
+        -- 对方背包变化时自动刷新列表
+        table.insert(BpItemConns, bp.ChildAdded:Connect(function(c)
+            if selectedBpPlayer == pl and c:IsA("Tool") then
+                task.defer(buildBpItemList, pl)
+            end
+        end))
+        table.insert(BpItemConns, bp.ChildRemoved:Connect(function(c)
+            if selectedBpPlayer == pl and c:IsA("Tool") then
+                task.defer(buildBpItemList, pl)
+            end
+        end))
+    end
+
+    if #items == 0 then
+        local empty = Instance.new("Frame")
+        empty.Size = UDim2.new(1, 0, 0, 52)
+        empty.LayoutOrder = 11
+        empty.BackgroundColor3 = THEME.Card
+        empty.BackgroundTransparency = 0.5
+        empty.BorderSizePixel = 0
+        empty.Parent = BpItemPage
+        corner(empty, 8)
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.new(1, -16, 1, 0)
+        t.Position = UDim2.new(0, 8, 0, 0)
+        t.BackgroundTransparency = 1
+        t.Text = "没有可见物品\n(对方背包未同步给你，或背包为空)"
+        t.TextColor3 = THEME.TextDim
+        t.Font = Enum.Font.Gotham
+        t.TextSize = 13
+        t.TextWrapped = true
+        t.Parent = empty
+        return
+    end
+
+    local order = 10
+    for _, it in ipairs(items) do
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, BTN_H)
+        row.LayoutOrder = order; order += 1
+        row.BackgroundColor3 = THEME.Card
+        row.BorderSizePixel = 0
+        row.Parent = BpItemPage
+        corner(row, 10)
+        stroke(row, THEME.Stroke, 1, 0.6)
+
+        local nm = Instance.new("TextLabel")
+        nm.Size = UDim2.new(1, -220, 1, 0)
+        nm.Position = UDim2.new(0, 14, 0, 0)
+        nm.BackgroundTransparency = 1
+        nm.Text = it.tool.Name
+        nm.TextColor3 = THEME.Text
+        nm.Font = Enum.Font.GothamSemibold
+        nm.TextSize = IS_MOBILE and 15 or 14
+        nm.TextXAlignment = Enum.TextXAlignment.Left
+        nm.TextTruncate = Enum.TextTruncate.AtEnd
+        nm.Parent = row
+
+        local tag = Instance.new("TextLabel")
+        tag.Size = UDim2.new(0, 84, 1, 0)
+        tag.AnchorPoint = Vector2.new(1, 0.5)
+        tag.Position = UDim2.new(1, -102, 0.5, 0)
+        tag.BackgroundTransparency = 1
+        tag.Text = it.where
+        tag.TextColor3 = it.where == "装备中" and THEME.Accent or THEME.TextDim
+        tag.Font = Enum.Font.Gotham
+        tag.TextSize = 12
+        tag.TextXAlignment = Enum.TextXAlignment.Right
+        tag.Parent = row
+
+        local takeBtn = Instance.new("TextButton")
+        takeBtn.Size = UDim2.new(0, 84, 0, BTN_H - 12)
+        takeBtn.AnchorPoint = Vector2.new(1, 0.5)
+        takeBtn.Position = UDim2.new(1, -8, 0.5, 0)
+        takeBtn.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
+        takeBtn.BorderSizePixel = 0
+        takeBtn.Text = "拿取"
+        takeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        takeBtn.Font = Enum.Font.GothamBold
+        takeBtn.TextSize = 14
+        takeBtn.AutoButtonColor = false
+        takeBtn.Parent = row
+        corner(takeBtn, 8)
+        attachPress(takeBtn, Color3.fromRGB(55, 140, 90), Color3.fromRGB(70, 170, 110))
+
+        takeBtn.MouseButton1Click:Connect(function()
+            local ok, msg = takeTool(it.tool)
+            takeBtn.Text = ok and "✓ 已拿取" or ("✗ " .. (msg or "失败"))
+            takeBtn.BackgroundColor3 = ok and THEME.On or THEME.Danger
+            task.delay(1.2, function()
+                if takeBtn.Parent then
+                    takeBtn.Text = "拿取"
+                    takeBtn.BackgroundColor3 = Color3.fromRGB(55, 140, 90)
+                end
+            end)
+        end)
+    end
+end
+
+-- 一键拿取全部
+BpTakeAll.MouseButton1Click:Connect(function()
+    local pl = selectedBpPlayer
+    if not pl or not pl.Parent then return end
+
+    local snapshot = {}
+    local char = pl.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") then table.insert(snapshot, t) end
+        end
+    end
+    local bp = pl:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then table.insert(snapshot, t) end
+        end
+    end
+
+    local okN = 0
+    for _, t in ipairs(snapshot) do
+        if takeTool(t) then okN += 1 end
+    end
+
+    BpTakeAll.Text = ("已拿取 %d/%d"):format(okN, #snapshot)
+    task.delay(1.5, function()
+        if BpTakeAll.Parent then BpTakeAll.Text = "⇓ 一键拿取全部" end
+    end)
+    if okN > 0 then buildBpItemList(pl) end
+end)
+
+-- 入口联动：进背包页 / 点刷新 都重建玩家列表
+BackpackNavBtn.MouseButton1Click:Connect(function()
+    buildBpPlayerList()
+end)
+BpRefresh.MouseButton1Click:Connect(function()
+    buildBpPlayerList()
+end)
+buildBpPlayerList() -- 预构建一次
 
 -- ================= 重生与清理 =================
 LP.CharacterAdded:Connect(function()
@@ -1404,15 +1759,15 @@ CloseBtn.MouseButton1Click:Connect(function()
     for _, c in ipairs(TouchConns) do c:Disconnect() end
     for _, c in ipairs(FlingConns) do c:Disconnect() end
 
-    -- 环境还原
     dayLoopRunning = false
     for _, c in ipairs(DayConns) do c:Disconnect() end
     table.clear(DayConns)
     restoreLighting()
 
+    clearBpItemConns()
     pcall(function() RunService:UnbindFromRenderStep("CG_Aimbot") end)
     ClearESP()
     ScreenGui:Destroy()
 end)
 
-print("[概念神菜单] v1.4 已加载：环境 → 强制白天")
+print("[概念神菜单] v1.5 已加载：背包 → 查看/拿取")
